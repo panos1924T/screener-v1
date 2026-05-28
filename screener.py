@@ -1,13 +1,11 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import requests
 import os
 
 tickers = ['AMD', 'NVDA', 'PLTR', 'ARM', 'SOFI', 'OXY', 'MPC', 'COP', 'FANG', 'DINO']
 
 def check_pullback_strategy(ticker_symbol):
-    # [Ο ΙΔΙΟΣ ΚΩΔΙΚΑΣ ΟΠΩΣ ΠΡΙΝ]
     try:
         ticker = yf.Ticker(ticker_symbol)
         df = ticker.history(period="1y")
@@ -15,10 +13,23 @@ def check_pullback_strategy(ticker_symbol):
         if df.empty or len(df) < 200:
             return None
             
-        df['SMA_200'] = ta.sma(df['Close'], length=200)
-        df['SMA_50'] = ta.sma(df['Close'], length=50)
-        df['EMA_20'] = ta.ema(df['Close'], length=20)
-        df['RSI_14'] = ta.rsi(df['Close'], length=14)
+        # ---------------------------------------------------------
+        # Υπολογισμός Δεικτών με Native Pandas (Αντικατάσταση pandas-ta)
+        # ---------------------------------------------------------
+        # Κινητοί Μέσοι Όροι
+        df['SMA_200'] = df['Close'].rolling(window=200).mean()
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
+        df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        
+        # Υπολογισμός RSI (14) - Μέθοδος Wilder
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        df['RSI_14'] = 100 - (100 / (1 + rs))
+        # ---------------------------------------------------------
         
         latest = df.iloc[-1]
         
@@ -28,9 +39,11 @@ def check_pullback_strategy(ticker_symbol):
         ema20 = latest['EMA_20']
         rsi = latest['RSI_14']
         
+        # Κανόνας 1: Trend Filter
         if price < sma200:
             return None
             
+        # Κανόνας 2: Value Zone (+/- 2% απόκλιση)
         near_ema20 = (ema20 * 0.98) <= price <= (ema20 * 1.02)
         near_sma50 = (sma50 * 0.98) <= price <= (sma50 * 1.02)
         between_ma = (sma50 <= price <= ema20) or (ema20 <= price <= sma50)
@@ -38,6 +51,7 @@ def check_pullback_strategy(ticker_symbol):
         if not (near_ema20 or near_sma50 or between_ma):
             return None
             
+        # Κανόνας 3: Momentum Trigger
         if not (35 <= rsi <= 45):
             return None
             
@@ -48,7 +62,8 @@ def check_pullback_strategy(ticker_symbol):
             'EMA20': round(ema20, 2),
             'SMA50': round(sma50, 2)
         }
-    except:
+    except Exception as e:
+        # Αθόρυβη αποτυχία για να συνεχίσει το loop
         return None
 
 def send_telegram_message(results, bot_token, chat_id):
@@ -63,13 +78,14 @@ def send_telegram_message(results, bot_token, chat_id):
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
+# Εκτέλεση σάρωσης
 results = []
 for t in tickers:
     res = check_pullback_strategy(t)
     if res:
         results.append(res)
 
-# Ανάγνωση μεταβλητών από το περιβάλλον του GitHub
+# Ανάγνωση Credentials από το GitHub Secrets
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
