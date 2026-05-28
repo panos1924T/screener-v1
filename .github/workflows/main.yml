@@ -2,18 +2,17 @@ name: Daily Swing Screener
 
 on:
   schedule:
-    # Εκτέλεση στις 20:30 UTC (23:30 Ώρα Ελλάδος) από Δευτέρα έως Παρασκευή
     - cron: '30 20 * * 1-5'
-  workflow_dispatch: # Επιτρέπει τη χειροκίνητη εκτέλεση για δοκιμή
+  workflow_dispatch:
 
 jobs:
   run-screener:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           
