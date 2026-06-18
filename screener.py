@@ -4,16 +4,20 @@ import requests
 import os
 import time
 
-def get_nasdaq100_tickers():
+def get_nasdaq100_tickers(api_key):
+    """Άντληση των tickers του NASDAQ-100 μέσω Financial Modeling Prep API"""
+    url = f"https://financialmodelingprep.com/api/v3/nasdaq_constituent?apikey={api_key}"
     try:
-        url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        tables = pd.read_html(url)
-        for table in tables:
-            if 'Ticker' in table.columns:
-                return [t.replace('.', '-') for t in table['Ticker'].tolist()]
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Εξαγωγή συμβόλων. Αντικαθιστούμε την τελεία με παύλα (π.χ. BRK.B -> BRK-B) για συμβατότητα με το yfinance
+        tickers = [item['symbol'].replace('.', '-') for item in data]
+        return tickers
     except Exception as e:
-        print(f"Σφάλμα ανάκτησης tickers: {e}")
-    return []
+        print(f"Σφάλμα ανάκτησης tickers από FMP: {e}")
+        return []
 
 def send_telegram_chunks(results, bot_token, chat_id):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -42,9 +46,18 @@ def send_telegram_chunks(results, bot_token, chat_id):
         requests.post(url, json=payload)
 
 def main():
-    tickers = get_nasdaq100_tickers()
+    # Λήψη των περιβαλλοντικών μεταβλητών
+    FMP_API_KEY = os.environ.get("FMP_API_KEY")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN")
+    CHAT_ID = os.environ.get("CHAT_ID")
+
+    if not all([FMP_API_KEY, BOT_TOKEN, CHAT_ID]):
+        print("Σφάλμα: Λείπουν περιβαλλοντικές μεταβλητές (FMP_API_KEY, BOT_TOKEN, CHAT_ID).")
+        return
+
+    tickers = get_nasdaq100_tickers(FMP_API_KEY)
     if not tickers:
-        print("Αποτυχία λήψης tickers.")
+        print("Αποτυχία λήψης tickers. Τερματισμός.")
         return
 
     print(f"Λήψη δεδομένων για {len(tickers)} μετοχές...")
@@ -60,15 +73,11 @@ def main():
             if df.empty or len(df) < 200:
                 continue
                 
-            # --- PURE PANDAS TECHNICAL INDICATORS ---
-            # SMA 200 & 50
+            # Υπολογισμός δεικτών
             df['SMA_200'] = df['Close'].rolling(window=200).mean()
             df['SMA_50'] = df['Close'].rolling(window=50).mean()
-            
-            # EMA 20
             df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
             
-            # RSI 14 (Wilder's Smoothing)
             delta = df['Close'].diff()
             gain = delta.where(delta > 0, 0)
             loss = -delta.where(delta < 0, 0)
@@ -76,10 +85,8 @@ def main():
             avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
             rs = avg_gain / avg_loss
             df['RSI_14'] = 100 - (100 / (1 + rs))
-            # ----------------------------------------
 
             latest = df.iloc[-1]
-            
             price = latest['Close']
             sma200 = latest['SMA_200']
             sma50 = latest['SMA_50']
@@ -89,6 +96,7 @@ def main():
             if pd.isna(sma200):
                 continue
 
+            # Business Logic
             if price < sma200:
                 continue
                 
@@ -112,13 +120,7 @@ def main():
         except Exception:
             continue
 
-    BOT_TOKEN = os.environ.get("BOT_TOKEN")
-    CHAT_ID = os.environ.get("CHAT_ID")
-
-    if BOT_TOKEN and CHAT_ID:
-        send_telegram_chunks(results, BOT_TOKEN, CHAT_ID)
-    else:
-        print("Σφάλμα: Λείπουν τα περιβαλλοντικά μεταβλητά.")
+    send_telegram_chunks(results, BOT_TOKEN, CHAT_ID)
 
 if __name__ == "__main__":
     main()
