@@ -4,20 +4,25 @@ import requests
 import os
 import time
 
-def get_nasdaq100_tickers(api_key):
-    """Άντληση των tickers του NASDAQ-100 μέσω Financial Modeling Prep API"""
-    url = f"https://financialmodelingprep.com/api/v3/nasdaq_constituent?apikey={api_key}"
+def get_nasdaq100_tickers():
+    """Δυναμική άντληση των tickers του NASDAQ-100 από τη Wikipedia με χρήση custom User-Agent"""
+    url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
-        data = response.json()
+        tables = pd.read_html(response.text)
         
-        # Εξαγωγή συμβόλων. Αντικαθιστούμε την τελεία με παύλα (π.χ. BRK.B -> BRK-B) για συμβατότητα με το yfinance
-        tickers = [item['symbol'].replace('.', '-') for item in data]
-        return tickers
+        for table in tables:
+            if 'Ticker' in table.columns:
+                return [t.replace('.', '-') for t in table['Ticker'].tolist()]
+                
     except Exception as e:
-        print(f"Σφάλμα ανάκτησης tickers από FMP: {e}")
-        return []
+        print(f"Σφάλμα ανάκτησης tickers από Wikipedia: {e}")
+    return []
 
 def send_telegram_chunks(results, bot_token, chat_id):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
