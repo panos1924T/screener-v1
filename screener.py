@@ -51,16 +51,15 @@ def send_telegram_chunks(results, bot_token, chat_id):
         requests.post(url, json=payload)
 
 def main():
-    # Λήψη των περιβαλλοντικών μεταβλητών
-    FMP_API_KEY = os.environ.get("FMP_API_KEY")
+    # Λήψη των περιβαλλοντικών μεταβλητών για το Telegram
     BOT_TOKEN = os.environ.get("BOT_TOKEN")
     CHAT_ID = os.environ.get("CHAT_ID")
 
-    if not all([FMP_API_KEY, BOT_TOKEN, CHAT_ID]):
-        print("Σφάλμα: Λείπουν περιβαλλοντικές μεταβλητές (FMP_API_KEY, BOT_TOKEN, CHAT_ID).")
+    if not all([BOT_TOKEN, CHAT_ID]):
+        print("Σφάλμα: Λείπουν περιβαλλοντικές μεταβλητές (BOT_TOKEN, CHAT_ID).")
         return
 
-    tickers = get_nasdaq100_tickers(FMP_API_KEY)
+    tickers = get_nasdaq100_tickers()
     if not tickers:
         print("Αποτυχία λήψης tickers. Τερματισμός.")
         return
@@ -78,7 +77,7 @@ def main():
             if df.empty or len(df) < 200:
                 continue
                 
-            # Υπολογισμός δεικτών
+            # Υπολογισμός δεικτών με καθαρή pandas
             df['SMA_200'] = df['Close'].rolling(window=200).mean()
             df['SMA_50'] = df['Close'].rolling(window=50).mean()
             df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
