@@ -1,12 +1,10 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import requests
 import os
 import time
 
 def get_nasdaq100_tickers():
-    """Δυναμική άντληση των tickers του NASDAQ-100"""
     try:
         url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
         tables = pd.read_html(url)
@@ -18,7 +16,6 @@ def get_nasdaq100_tickers():
     return []
 
 def send_telegram_chunks(results, bot_token, chat_id):
-    """Αποστολή αποτελεσμάτων στο Telegram με διαχείριση ορίου χαρακτήρων"""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
     if not results:
@@ -32,16 +29,14 @@ def send_telegram_chunks(results, bot_token, chat_id):
     for r in results:
         msg_part = f"🔹 **{r['Ticker']}**\nΤιμή: ${r['Price']} | RSI: {r['RSI']}\nEMA20: ${r['EMA20']} | SMA50: ${r['SMA50']}\n\n"
         
-        # Αν το μήνυμα υπερβαίνει το όριο, στείλε το τρέχον block και ξεκίνα νέο
         if len(current_message) + len(msg_part) > 4000:
             payload = {"chat_id": chat_id, "text": current_message, "parse_mode": "Markdown"}
             requests.post(url, json=payload)
-            time.sleep(1) # Αποφυγή rate limit από το Telegram API
+            time.sleep(1)
             current_message = "📊 **Daily Swing Trading Setups (Cont.)**\n\n"
         
         current_message += msg_part
         
-    # Αποστολή του τελευταίου τμήματος
     if len(current_message) > 45: 
         payload = {"chat_id": chat_id, "text": current_message, "parse_mode": "Markdown"}
         requests.post(url, json=payload)
@@ -53,26 +48,36 @@ def main():
         return
 
     print(f"Λήψη δεδομένων για {len(tickers)} μετοχές...")
-    # Λήψη δεδομένων 1 έτους (απαιτείται για τον υπολογισμό του SMA 200)
     all_data = yf.download(tickers, period="1y", group_by='ticker', progress=False)
     
     results = []
 
     for ticker in tickers:
         try:
-            # Απομόνωση των δεδομένων της μετοχής και αποφυγή SettingWithCopyWarning
             df = all_data[ticker].copy()
             df.dropna(inplace=True)
             
             if df.empty or len(df) < 200:
                 continue
                 
-            # Υπολογισμός δεικτών μέσω pandas_ta
-            df['SMA_200'] = ta.sma(df['Close'], length=200)
-            df['SMA_50'] = ta.sma(df['Close'], length=50)
-            df['EMA_20'] = ta.ema(df['Close'], length=20)
-            df['RSI_14'] = ta.rsi(df['Close'], length=14)
+            # --- PURE PANDAS TECHNICAL INDICATORS ---
+            # SMA 200 & 50
+            df['SMA_200'] = df['Close'].rolling(window=200).mean()
+            df['SMA_50'] = df['Close'].rolling(window=50).mean()
             
+            # EMA 20
+            df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+            
+            # RSI 14 (Wilder's Smoothing)
+            delta = df['Close'].diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+            avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+            rs = avg_gain / avg_loss
+            df['RSI_14'] = 100 - (100 / (1 + rs))
+            # ----------------------------------------
+
             latest = df.iloc[-1]
             
             price = latest['Close']
@@ -81,11 +86,9 @@ def main():
             ema20 = latest['EMA_20']
             rsi = latest['RSI_14']
             
-            # Έλεγχος αν ο SMA200 είναι NaN 
             if pd.isna(sma200):
                 continue
 
-            # Εφαρμογή κριτηρίων στρατηγικής
             if price < sma200:
                 continue
                 
@@ -115,7 +118,7 @@ def main():
     if BOT_TOKEN and CHAT_ID:
         send_telegram_chunks(results, BOT_TOKEN, CHAT_ID)
     else:
-        print("Σφάλμα: Λείπουν τα περιβαλλοντικά μεταβλητά BOT_TOKEN ή CHAT_ID.")
+        print("Σφάλμα: Λείπουν τα περιβαλλοντικά μεταβλητά.")
 
 if __name__ == "__main__":
     main()
