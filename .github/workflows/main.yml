@@ -21,7 +21,6 @@ jobs:
         
       - name: Run Screener Script
         env:
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python screener.py
