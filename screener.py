@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import os
 import time
+from io import StringIO
 
 def get_nasdaq100_tickers():
     """Δυναμική άντληση των tickers του NASDAQ-100 από τη Wikipedia"""
@@ -14,11 +15,14 @@ def get_nasdaq100_tickers():
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        tables = pd.read_html(response.text)
+        
+        tables = pd.read_html(StringIO(response.text))
         
         for table in tables:
-            if 'Ticker' in table.columns:
-                return [t.replace('.', '-') for t in table['Ticker'].tolist()]
+            # Έλεγχος για πιθανές ονομασίες της στήλης (Symbol ή Ticker)
+            col = next((c for c in table.columns if c in ['Symbol', 'Ticker', 'Ticker symbol']), None)
+            if col:
+                return [str(t).replace('.', '-') for t in table[col].tolist()]
                 
     except Exception as e:
         print(f"Σφάλμα ανάκτησης tickers: {e}")
