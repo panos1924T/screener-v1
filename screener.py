@@ -6,7 +6,6 @@ import time
 from io import StringIO
 
 # ============================================================
-# STATIC FALLBACK — used only if BOTH live sources fail.
 # Update this occasionally (e.g. once a quarter) by hand.
 # Snapshot as of Nasdaq-100 constituents, Jan 2026.
 # ============================================================
@@ -25,143 +24,6 @@ STATIC_FALLBACK_TICKERS = [
     "TSLA", "TXN", "TRI", "VRSK", "VRTX", "WMT", "WBD", "WDC", "WDAY",
     "XEL", "ZS",
 ]
-
-
-def get_nasdaq100_tickers():
-    """
-    Παίρνει δυναμικά τα tickers του NASDAQ-100.
-    1η προσπάθεια: επίσημη σελίδα Nasdaq
-    2η προσπάθεια: Wikipedia
-    3η προσπάθεια: static fallback (bundled in repo)
-    """
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    # --------------------------------------------------------
-    # 1. OFFICIAL NASDAQ
-    # --------------------------------------------------------
-
-    try:
-        url = "https://www.nasdaq.com/solutions/nasdaq-100/companies"
-
-        response = requests.get(url, headers=headers, timeout=20)
-
-        # DEBUG: always print what we actually got back, even on 200,
-        # so a "no suitable table" failure is diagnosable from CI logs.
-        print(
-            f"Nasdaq: HTTP {response.status_code}, "
-            f"{len(response.text)} bytes received."
-        )
-
-        response.raise_for_status()
-
-        tables = pd.read_html(StringIO(response.text))
-        print(f"Nasdaq: pandas found {len(tables)} <table> elements.")
-
-        for i, table in enumerate(tables):
-            print(f"Nasdaq: table {i} columns = {list(table.columns)}")
-
-            symbol_col = None
-            for col in table.columns:
-                if str(col).strip().lower() in ["symbol", "ticker"]:
-                    symbol_col = col
-                    break
-
-            if symbol_col is None:
-                continue
-
-            tickers = (
-                table[symbol_col]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .str.replace(".", "-", regex=False)
-                .tolist()
-            )
-
-            tickers = [t for t in tickers if t and len(t) <= 10]
-
-            if len(tickers) >= 90:
-                print(f"OK: Βρέθηκαν {len(tickers)} NASDAQ-100 tickers από Nasdaq.")
-                return tickers
-
-        print("Nasdaq: Δεν βρέθηκε κατάλληλος πίνακας (πιθανό bot-block/JS page).")
-
-    except Exception as e:
-        print(f"Nasdaq ticker retrieval failed: {type(e).__name__}: {e}")
-
-    # --------------------------------------------------------
-    # 2. WIKIPEDIA FALLBACK
-    # --------------------------------------------------------
-
-    try:
-        url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-
-        response = requests.get(url, headers=headers, timeout=20)
-
-        print(
-            f"Wikipedia: HTTP {response.status_code}, "
-            f"{len(response.text)} bytes received."
-        )
-
-        response.raise_for_status()
-
-        tables = pd.read_html(StringIO(response.text))
-        print(f"Wikipedia: pandas found {len(tables)} <table> elements.")
-
-        for i, table in enumerate(tables):
-            print(f"Wikipedia: table {i} columns = {list(table.columns)}")
-
-            symbol_col = None
-            for col in table.columns:
-                col_name = str(col).strip().lower()
-                if col_name in ("ticker", "symbol") or "ticker" in col_name or "symbol" in col_name:
-                    symbol_col = col
-                    break
-
-            if symbol_col is None:
-                continue
-
-            tickers = (
-                table[symbol_col]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .str.replace(".", "-", regex=False)
-                .tolist()
-            )
-
-            tickers = [t for t in tickers if t and len(t) <= 10]
-
-            if len(tickers) >= 90:
-                print(f"OK: Βρέθηκαν {len(tickers)} NASDAQ-100 tickers από Wikipedia.")
-                return tickers
-
-        print("Wikipedia: Δεν βρέθηκε κατάλληλος πίνακας (πιθανό rate-limit από data-center IP).")
-
-    except Exception as e:
-        print(f"Wikipedia ticker retrieval failed: {type(e).__name__}: {e}")
-
-    # --------------------------------------------------------
-    # 3. STATIC FALLBACK — guarantees the job doesn't die entirely
-    # --------------------------------------------------------
-
-    print(
-        f"WARNING: Live scraping failed. Χρήση static fallback λίστας "
-        f"({len(STATIC_FALLBACK_TICKERS)} tickers, ενδέχεται να μην είναι 100% ενημερωμένη)."
-    )
-    return STATIC_FALLBACK_TICKERS
     
 # ============================================================
 # TELEGRAM
@@ -296,7 +158,7 @@ def main():
     # GET TICKERS
     # --------------------------------------------------------
 
-    tickers = get_nasdaq100_tickers()
+    tickers = STATIC_FALLBACK_TICKERS
 
     if not tickers:
 
