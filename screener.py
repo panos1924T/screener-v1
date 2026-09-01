@@ -1,13 +1,14 @@
+```python
 import yfinance as yf
 import pandas as pd
 import requests
 import os
 import time
-from io import StringIO
+
 
 # ============================================================
-# Update this occasionally (e.g. once a quarter) by hand.
-# Snapshot as of Nasdaq-100 constituents, Jan 2026.
+# NASDAQ-100 TICKERS
+# Snapshot as of Jan 2026
 # ============================================================
 
 STATIC_FALLBACK_TICKERS = [
@@ -24,7 +25,103 @@ STATIC_FALLBACK_TICKERS = [
     "TSLA", "TXN", "TRI", "VRSK", "VRTX", "WMT", "WBD", "WDC", "WDAY",
     "XEL", "ZS",
 ]
-    
+
+
+# ============================================================
+# STRATEGY SETTINGS
+# ============================================================
+
+ENTRY_BUFFER = 0.15          # Entry = Signal High + $0.15
+SWING_LOOKBACK = 3            # Bars left/right for swing detection
+SL_BUFFER = 0.05              # SL placed $0.05 below swing low
+MIN_RR = 2.0                  # Minimum acceptable Risk/Reward
+
+
+# ============================================================
+# FIND SWING LOW
+# ============================================================
+
+def find_previous_swing_low(df, signal_index):
+    """
+    Finds the most recent confirmed swing low BEFORE the signal candle.
+
+    A swing low is a candle whose Low is lower than the lows of
+    SWING_LOOKBACK candles before and after it.
+
+    IMPORTANT:
+    We only use swings that were already confirmed BEFORE the
+    signal candle. Therefore there is no look-ahead for the signal.
+    """
+
+    start = SWING_LOOKBACK
+    end = signal_index - SWING_LOOKBACK
+
+    if end <= start:
+        return None
+
+    for i in range(end - 1, start - 1, -1):
+
+        current_low = df["Low"].iloc[i]
+
+        left_lows = df["Low"].iloc[
+            i - SWING_LOOKBACK:i
+        ]
+
+        right_lows = df["Low"].iloc[
+            i + 1:i + SWING_LOOKBACK + 1
+        ]
+
+        if (
+            current_low < left_lows.min()
+            and current_low < right_lows.min()
+        ):
+            return float(current_low)
+
+    return None
+
+
+# ============================================================
+# FIND PREVIOUS SWING HIGH
+# ============================================================
+
+def find_previous_swing_high(df, signal_index):
+    """
+    Finds the most recent confirmed swing high BEFORE the signal candle.
+
+    A swing high is a candle whose High is higher than the highs of
+    SWING_LOOKBACK candles before and after it.
+
+    IMPORTANT:
+    Only confirmed swings before the signal candle are used.
+    """
+
+    start = SWING_LOOKBACK
+    end = signal_index - SWING_LOOKBACK
+
+    if end <= start:
+        return None
+
+    for i in range(end - 1, start - 1, -1):
+
+        current_high = df["High"].iloc[i]
+
+        left_highs = df["High"].iloc[
+            i - SWING_LOOKBACK:i
+        ]
+
+        right_highs = df["High"].iloc[
+            i + 1:i + SWING_LOOKBACK + 1
+        ]
+
+        if (
+            current_high > left_highs.max()
+            and current_high > right_highs.max()
+        ):
+            return float(current_high)
+
+    return None
+
+
 # ============================================================
 # TELEGRAM
 # ============================================================
@@ -64,23 +161,49 @@ def send_telegram_chunks(results, bot_token, chat_id):
         return
 
     # --------------------------------------------------------
-    # RESULTS
+    # SORT BY R:R
+    # --------------------------------------------------------
+
+    results = sorted(
+        results,
+        key=lambda x: x["RR"],
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # HEADER
     # --------------------------------------------------------
 
     current_message = (
         "📊 **Daily Swing Trading Setups**\n\n"
+        "🎯 Strategy: Breakout\n"
+        "Minimum R:R: 2.0\n\n"
     )
+
+    # --------------------------------------------------------
+    # RESULTS
+    # --------------------------------------------------------
 
     for r in results:
 
         msg_part = (
             f"🔹 **{r['Ticker']}**\n"
-            f"Τιμή: ${r['Price']} | Low: ${r['Low']}\n"
+            f"Τιμή: ${r['Price']} | High: ${r['High']} | Low: ${r['Low']}\n"
             f"RSI: {r['RSI']} | Volume: {r['Vol_Status']}\n"
-            f"EMA20: ${r['EMA20']} | SMA50: ${r['SMA50']}\n\n"
+            f"EMA20: ${r['EMA20']} | SMA50: ${r['SMA50']}\n"
+            f"\n"
+            f"🎯 Entry: ${r['Entry']}\n"
+            f"🛑 SL: ${r['SL']}\n"
+            f"💰 TP: ${r['TP']}\n"
+            f"📉 Risk: ${r['Risk']}\n"
+            f"📈 Reward: ${r['Reward']}\n"
+            f"⚖️ R:R: **1:{r['RR']}**\n"
+            f"\n"
+            f"🟢 **SETUP VALID**\n\n"
         )
 
         # Telegram limit ~4096 characters
+
         if len(current_message) + len(msg_part) > 4000:
 
             payload = {
@@ -235,6 +358,7 @@ def main():
             # -----------------------------------------------
 
             # SMA 200
+
             df["SMA_200"] = (
                 df["Close"]
                 .rolling(window=200)
@@ -242,6 +366,7 @@ def main():
             )
 
             # SMA 50
+
             df["SMA_50"] = (
                 df["Close"]
                 .rolling(window=50)
@@ -249,6 +374,7 @@ def main():
             )
 
             # EMA 20
+
             df["EMA_20"] = (
                 df["Close"]
                 .ewm(
@@ -259,6 +385,7 @@ def main():
             )
 
             # Average Volume 20
+
             df["Avg_Vol_20"] = (
                 df["Volume"]
                 .rolling(window=20)
@@ -298,20 +425,23 @@ def main():
             )
 
             # -----------------------------------------------
-            # LATEST DATA
+            # LATEST COMPLETED CANDLE
             # -----------------------------------------------
 
-            latest = df.iloc[-1]
+            signal_index = len(df) - 1
 
-            price = latest["Close"]
-            low = latest["Low"]
-            volume = latest["Volume"]
-            avg_vol = latest["Avg_Vol_20"]
+            latest = df.iloc[signal_index]
 
-            sma200 = latest["SMA_200"]
-            sma50 = latest["SMA_50"]
-            ema20 = latest["EMA_20"]
-            rsi = latest["RSI_14"]
+            price = float(latest["Close"])
+            high = float(latest["High"])
+            low = float(latest["Low"])
+            volume = float(latest["Volume"])
+            avg_vol = float(latest["Avg_Vol_20"])
+
+            sma200 = float(latest["SMA_200"])
+            sma50 = float(latest["SMA_50"])
+            ema20 = float(latest["EMA_20"])
+            rsi = float(latest["RSI_14"])
 
             # -----------------------------------------------
             # CHECK NaN
@@ -321,6 +451,7 @@ def main():
                 pd.isna(x)
                 for x in [
                     price,
+                    high,
                     low,
                     volume,
                     avg_vol,
@@ -333,7 +464,7 @@ def main():
                 continue
 
             # =================================================
-            # BUSINESS LOGIC
+            # EXISTING BUSINESS LOGIC
             # =================================================
 
             # -----------------------------------------------
@@ -392,31 +523,154 @@ def main():
             else:
                 vol_status = "Avg ⚪"
 
+            # =================================================
+            # NEW SWING TRADE LOGIC
+            # =================================================
+
             # -----------------------------------------------
-            # ADD RESULT
+            # 5. ENTRY
+            # Signal High + $0.15
+            # -----------------------------------------------
+
+            entry = high + ENTRY_BUFFER
+
+            # -----------------------------------------------
+            # 6. PREVIOUS SWING LOW
+            # -----------------------------------------------
+
+            swing_low = find_previous_swing_low(
+                df,
+                signal_index
+            )
+
+            if swing_low is None:
+                print(
+                    f"{ticker}: Δεν βρέθηκε Swing Low."
+                )
+                continue
+
+            # -----------------------------------------------
+            # 7. STOP LOSS
+            #
+            # Below the recent swing low.
+            # -----------------------------------------------
+
+            sl = swing_low - SL_BUFFER
+
+            # -----------------------------------------------
+            # Safety:
+            # SL must be below Entry.
+            # -----------------------------------------------
+
+            if sl >= entry:
+                print(
+                    f"{ticker}: Invalid SL."
+                )
+                continue
+
+            # -----------------------------------------------
+            # 8. PREVIOUS SWING HIGH
+            # -----------------------------------------------
+
+            swing_high = find_previous_swing_high(
+                df,
+                signal_index
+            )
+
+            if swing_high is None:
+                print(
+                    f"{ticker}: Δεν βρέθηκε Swing High."
+                )
+                continue
+
+            # -----------------------------------------------
+            # 9. TAKE PROFIT
+            #
+            # Previous Swing High
+            # -----------------------------------------------
+
+            tp = swing_high
+
+            # -----------------------------------------------
+            # TP must be above Entry
+            # -----------------------------------------------
+
+            if tp <= entry:
+                print(
+                    f"{ticker}: Previous Swing High "
+                    f"is below Entry."
+                )
+                continue
+
+            # -----------------------------------------------
+            # 10. RISK
+            # -----------------------------------------------
+
+            risk = entry - sl
+
+            # -----------------------------------------------
+            # 11. REWARD
+            # -----------------------------------------------
+
+            reward = tp - entry
+
+            # -----------------------------------------------
+            # 12. RISK / REWARD
+            # -----------------------------------------------
+
+            rr = reward / risk
+
+            # -----------------------------------------------
+            # 13. MINIMUM R:R FILTER
+            # -----------------------------------------------
+
+            if rr < MIN_RR:
+                print(
+                    f"{ticker}: R:R too low "
+                    f"({rr:.2f})"
+                )
+                continue
+
+            # -----------------------------------------------
+            # 14. ADD RESULT
             # -----------------------------------------------
 
             results.append(
                 {
                     "Ticker": ticker,
-                    "Price": round(float(price), 2),
-                    "Low": round(float(low), 2),
-                    "RSI": round(float(rsi), 2),
-                    "EMA20": round(float(ema20), 2),
-                    "SMA50": round(float(sma50), 2),
-                    "Vol_Status": vol_status
+                    "Price": round(price, 2),
+                    "High": round(high, 2),
+                    "Low": round(low, 2),
+
+                    "RSI": round(rsi, 2),
+                    "EMA20": round(ema20, 2),
+                    "SMA50": round(sma50, 2),
+
+                    "Vol_Status": vol_status,
+
+                    "Swing_Low": round(swing_low, 2),
+                    "Swing_High": round(swing_high, 2),
+
+                    "Entry": round(entry, 2),
+                    "SL": round(sl, 2),
+                    "TP": round(tp, 2),
+
+                    "Risk": round(risk, 2),
+                    "Reward": round(reward, 2),
+                    "RR": round(rr, 2)
                 }
             )
 
             print(
                 f"FOUND: {ticker} | "
-                f"Price={price:.2f} | "
-                f"RSI={rsi:.2f}"
+                f"Entry={entry:.2f} | "
+                f"SL={sl:.2f} | "
+                f"TP={tp:.2f} | "
+                f"R:R=1:{rr:.2f}"
             )
 
         except Exception as e:
 
-            # Δεν κρύβουμε πλέον τα errors
             print(
                 f"ERROR στο {ticker}: "
                 f"{type(e).__name__}: {e}"
@@ -430,7 +684,7 @@ def main():
 
     print(
         f"Screening ολοκληρώθηκε. "
-        f"Βρέθηκαν {len(results)} setups."
+        f"Βρέθηκαν {len(results)} valid setups."
     )
 
     # --------------------------------------------------------
@@ -450,3 +704,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
