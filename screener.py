@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import requests
 import os
 import time
@@ -7,10 +8,10 @@ import time
 
 # ============================================================
 # NASDAQ-100 TICKERS
-# Snapshot as of Jan 2026
+# Update occasionally
 # ============================================================
 
-STATIC_FALLBACK_TICKERS = [
+TICKERS = [
     "ADBE", "AMD", "ABNB", "ALNY", "GOOGL", "GOOG", "AMZN", "AEP", "AMGN",
     "ADI", "AAPL", "AMAT", "APP", "ARM", "ASML", "ADSK", "ADP", "AXON",
     "BKR", "BKNG", "AVGO", "CDNS", "CHTR", "CTAS", "CSCO", "CCEP", "CTSH",
@@ -27,231 +28,304 @@ STATIC_FALLBACK_TICKERS = [
 
 
 # ============================================================
-# STRATEGY SETTINGS
+# ACCOUNT SETTINGS
 # ============================================================
 
-ENTRY_BUFFER = 0.15          # Entry = Signal High + $0.15
-SWING_LOOKBACK = 3            # Bars left/right for swing detection
-SL_BUFFER = 0.05              # SL placed $0.05 below swing low
-MIN_RR = 2.0                  # Minimum acceptable Risk/Reward
+DEFAULT_ACCOUNT_EQUITY = 1000.0
+DEFAULT_AVAILABLE_CASH = 1000.0
+
+RISK_PER_TRADE = 0.005       # 0.5%
+MAX_OPEN_POSITIONS = 3
+
+MIN_SHARE_SIZE = 0.0001
 
 
 # ============================================================
-# FIND SWING LOW
+# EXECUTION ASSUMPTIONS
+#
+# Same assumptions used in V8
 # ============================================================
 
-def find_previous_swing_low(df, signal_index):
-    """
-    Finds the most recent confirmed swing low BEFORE the signal candle.
+SLIPPAGE_PCT = 0.0005        # 0.05%
+COMMISSION_PCT = 0.0002      # 0.02% simulated cost
 
-    A swing low is a candle whose Low is lower than the lows of
-    SWING_LOOKBACK candles before and after it.
 
-    IMPORTANT:
-    We only use swings that were already confirmed BEFORE the
-    signal candle. Therefore there is no look-ahead for the signal.
-    """
+# ============================================================
+# STRATEGY SETTINGS - V8
+# ============================================================
 
-    start = SWING_LOOKBACK
-    end = signal_index - SWING_LOOKBACK
+ATR_PERIOD = 14
+SWING_LOOKBACK = 3
 
-    if end <= start:
+ENTRY_ATR_BUFFER = 0.10
+SL_ATR_BUFFER = 0.10
+
+MIN_STOP_ATR = 0.50
+
+SMA50_SLOPE_LOOKBACK = 10
+
+RSI_MIN = 35
+RSI_MAX = 55
+
+SUPPORT_TOLERANCE = 0.01
+
+
+# ============================================================
+# RSI
+# ============================================================
+
+def calculate_rsi(series, period=14):
+
+    delta = series.diff()
+
+    gain = delta.where(
+        delta > 0,
+        0.0
+    )
+
+    loss = -delta.where(
+        delta < 0,
+        0.0
+    )
+
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+# ============================================================
+# ATR
+# ============================================================
+
+def calculate_atr(df, period=14):
+
+    previous_close = df["Close"].shift(1)
+
+    true_range = pd.concat(
+        [
+            df["High"] - df["Low"],
+            (df["High"] - previous_close).abs(),
+            (df["Low"] - previous_close).abs()
+        ],
+        axis=1
+    ).max(axis=1)
+
+    return true_range.ewm(
+        alpha=1 / period,
+        adjust=False
+    ).mean()
+
+
+# ============================================================
+# CONFIRMED SWING LOW
+# ============================================================
+
+def find_previous_swing_low(df):
+
+    signal_index = len(df) - 1
+
+    latest_candidate = (
+        signal_index
+        - SWING_LOOKBACK
+        - 1
+    )
+
+    if latest_candidate < SWING_LOOKBACK:
         return None
 
-    for i in range(end - 1, start - 1, -1):
+    for i in range(
+        latest_candidate,
+        SWING_LOOKBACK - 1,
+        -1
+    ):
 
-        current_low = df["Low"].iloc[i]
+        current = float(
+            df["Low"].iloc[i]
+        )
 
-        left_lows = df["Low"].iloc[
+        left = df["Low"].iloc[
             i - SWING_LOOKBACK:i
         ]
 
-        right_lows = df["Low"].iloc[
-            i + 1:i + SWING_LOOKBACK + 1
+        right = df["Low"].iloc[
+            i + 1:
+            i + SWING_LOOKBACK + 1
         ]
 
         if (
-            current_low < left_lows.min()
-            and current_low < right_lows.min()
+            current < float(left.min())
+            and
+            current < float(right.min())
         ):
-            return float(current_low)
+            return current
 
     return None
 
 
 # ============================================================
-# FIND PREVIOUS SWING HIGH
+# QUALITY SCORE
+#
+# Same logic as V8 ranking
 # ============================================================
 
-def find_previous_swing_high(df, signal_index):
-    """
-    Finds the most recent confirmed swing high BEFORE the signal candle.
+def calculate_quality_score(
+    close,
+    high,
+    low,
+    ema20,
+    sma50,
+    old_sma50,
+    atr
+):
 
-    A swing high is a candle whose High is higher than the highs of
-    SWING_LOOKBACK candles before and after it.
+    slope_score = (
+        sma50
+        - old_sma50
+    ) / atr
 
-    IMPORTANT:
-    Only confirmed swings before the signal candle are used.
-    """
+    ema_strength = (
+        ema20
+        - sma50
+    ) / atr
 
-    start = SWING_LOOKBACK
-    end = signal_index - SWING_LOOKBACK
+    candle_range = (
+        high - low
+    )
 
-    if end <= start:
-        return None
+    if candle_range <= 0:
 
-    for i in range(end - 1, start - 1, -1):
+        close_location = 0
 
-        current_high = df["High"].iloc[i]
+    else:
 
-        left_highs = df["High"].iloc[
-            i - SWING_LOOKBACK:i
-        ]
+        close_location = (
+            close - low
+        ) / candle_range
 
-        right_highs = df["High"].iloc[
-            i + 1:i + SWING_LOOKBACK + 1
-        ]
+    quality_score = (
+        slope_score
+        + ema_strength
+        + close_location
+    )
 
-        if (
-            current_high > left_highs.max()
-            and current_high > right_highs.max()
-        ):
-            return float(current_high)
+    return {
+        "Quality_Score": quality_score,
+        "Slope_Score": slope_score,
+        "EMA_Strength": ema_strength,
+        "Close_Location": close_location
+    }
 
-    return None
+
+# ============================================================
+# QQQ MARKET FILTER
+# ============================================================
+
+def check_qqq_bull():
+
+    qqq = yf.download(
+        "QQQ",
+        period="1y",
+        interval="1d",
+        progress=False,
+        auto_adjust=True,
+        repair=True
+    )
+
+    if qqq.empty:
+
+        raise RuntimeError(
+            "Δεν υπάρχουν δεδομένα QQQ."
+        )
+
+    if isinstance(
+        qqq.columns,
+        pd.MultiIndex
+    ):
+
+        qqq.columns = (
+            qqq.columns
+            .get_level_values(0)
+        )
+
+    qqq.dropna(
+        inplace=True
+    )
+
+    qqq["SMA200"] = (
+        qqq["Close"]
+        .rolling(200)
+        .mean()
+    )
+
+    latest = qqq.iloc[-1]
+
+    close = float(
+        latest["Close"]
+    )
+
+    sma200 = float(
+        latest["SMA200"]
+    )
+
+    if pd.isna(sma200):
+
+        raise RuntimeError(
+            "Δεν υπάρχουν αρκετά QQQ δεδομένα για SMA200."
+        )
+
+    return {
+        "Bull": close > sma200,
+        "Close": close,
+        "SMA200": sma200
+    }
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def send_telegram_chunks(results, bot_token, chat_id):
+def send_telegram_message(
+    text,
+    bot_token,
+    chat_id
+):
 
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-
-    # --------------------------------------------------------
-    # NO RESULTS
-    # --------------------------------------------------------
-
-    if not results:
-
-        message = (
-            "📊 **Daily Swing Trading Setups**\n\n"
-            "Καμία μετοχή δεν ικανοποιεί τα κριτήρια σήμερα."
-        )
-
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=20
-            )
-            response.raise_for_status()
-
-        except Exception as e:
-            print(f"Telegram error: {e}")
-
-        return
-
-    # --------------------------------------------------------
-    # SORT BY R:R
-    # --------------------------------------------------------
-
-    results = sorted(
-        results,
-        key=lambda x: x["RR"],
-        reverse=True
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{bot_token}/sendMessage"
     )
 
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
 
-    current_message = (
-        "📊 **Daily Swing Trading Setups**\n\n"
-        "🎯 Strategy: Breakout\n"
-        "Minimum R:R: 2.0\n\n"
-    )
+    try:
 
-    # --------------------------------------------------------
-    # RESULTS
-    # --------------------------------------------------------
-
-    for r in results:
-
-        msg_part = (
-            f"🔹 **{r['Ticker']}**\n"
-            f"Τιμή: ${r['Price']} | High: ${r['High']} | Low: ${r['Low']}\n"
-            f"RSI: {r['RSI']} | Volume: {r['Vol_Status']}\n"
-            f"EMA20: ${r['EMA20']} | SMA50: ${r['SMA50']}\n"
-            f"\n"
-            f"🎯 Entry: ${r['Entry']}\n"
-            f"🛑 SL: ${r['SL']}\n"
-            f"💰 TP: ${r['TP']}\n"
-            f"📉 Risk: ${r['Risk']}\n"
-            f"📈 Reward: ${r['Reward']}\n"
-            f"⚖️ R:R: **1:{r['RR']}**\n"
-            f"\n"
-            f"🟢 **SETUP VALID**\n\n"
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=20
         )
 
-        # Telegram limit ~4096 characters
+        response.raise_for_status()
 
-        if len(current_message) + len(msg_part) > 4000:
+    except Exception as e:
 
-            payload = {
-                "chat_id": chat_id,
-                "text": current_message,
-                "parse_mode": "Markdown"
-            }
-
-            try:
-                response = requests.post(
-                    url,
-                    json=payload,
-                    timeout=20
-                )
-                response.raise_for_status()
-
-            except Exception as e:
-                print(f"Telegram error: {e}")
-
-            time.sleep(1)
-
-            current_message = (
-                "📊 **Daily Swing Trading Setups (Cont.)**\n\n"
-            )
-
-        current_message += msg_part
-
-    # --------------------------------------------------------
-    # SEND LAST MESSAGE
-    # --------------------------------------------------------
-
-    if len(current_message) > 45:
-
-        payload = {
-            "chat_id": chat_id,
-            "text": current_message,
-            "parse_mode": "Markdown"
-        }
-
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=20
-            )
-            response.raise_for_status()
-
-        except Exception as e:
-            print(f"Telegram error: {e}")
+        print(
+            f"Telegram error: {e}"
+        )
 
 
 # ============================================================
@@ -260,121 +334,254 @@ def send_telegram_chunks(results, bot_token, chat_id):
 
 def main():
 
-    BOT_TOKEN = os.environ.get("BOT_TOKEN")
-    CHAT_ID = os.environ.get("CHAT_ID")
+    # ========================================================
+    # SECRETS
+    # ========================================================
 
-    # --------------------------------------------------------
-    # ENVIRONMENT VARIABLES
-    # --------------------------------------------------------
+    BOT_TOKEN = os.environ.get(
+        "BOT_TOKEN"
+    )
+
+    CHAT_ID = os.environ.get(
+        "CHAT_ID"
+    )
 
     if not BOT_TOKEN or not CHAT_ID:
 
         print(
-            "ERROR: Λείπουν BOT_TOKEN ή CHAT_ID "
-            "από τα GitHub Secrets."
+            "ERROR: Λείπουν BOT_TOKEN ή CHAT_ID."
         )
 
         return
 
-    # --------------------------------------------------------
-    # GET TICKERS
-    # --------------------------------------------------------
+    # ========================================================
+    # ACCOUNT VALUES
+    #
+    # Can optionally be set in GitHub Secrets/Variables.
+    # ========================================================
 
-    tickers = STATIC_FALLBACK_TICKERS
+    account_equity = float(
+        os.environ.get(
+            "ACCOUNT_EQUITY",
+            DEFAULT_ACCOUNT_EQUITY
+        )
+    )
 
-    if not tickers:
+    available_cash = float(
+        os.environ.get(
+            "AVAILABLE_CASH",
+            DEFAULT_AVAILABLE_CASH
+        )
+    )
+
+    # Example:
+    # OPEN_POSITIONS=NVDA,AAPL
+    open_positions_text = (
+        os.environ.get(
+            "OPEN_POSITIONS",
+            ""
+        )
+    )
+
+    open_positions = {
+        x.strip().upper()
+        for x in
+        open_positions_text.split(",")
+        if x.strip()
+    }
+
+    available_slots = max(
+        0,
+        MAX_OPEN_POSITIONS
+        - len(open_positions)
+    )
+
+    print("=" * 70)
+
+    print(
+        "DAILY PULLBACK SCANNER V8"
+    )
+
+    print("=" * 70)
+
+    print(
+        f"Account equity: ${account_equity:.2f}"
+    )
+
+    print(
+        f"Available cash: ${available_cash:.2f}"
+    )
+
+    print(
+        f"Open positions: {len(open_positions)}"
+    )
+
+    print(
+        f"Available slots: {available_slots}"
+    )
+
+    print()
+
+    # ========================================================
+    # NO AVAILABLE POSITION SLOTS
+    # ========================================================
+
+    if available_slots <= 0:
+
+        send_telegram_message(
+            (
+                "📊 *Daily Pullback Scanner V8*\n\n"
+                "Δεν υπάρχουν διαθέσιμα position slots.\n\n"
+                f"Open positions: "
+                f"{', '.join(sorted(open_positions))}\n"
+                f"Max positions: {MAX_OPEN_POSITIONS}"
+            ),
+            BOT_TOKEN,
+            CHAT_ID
+        )
+
+        return
+
+    # ========================================================
+    # QQQ MARKET REGIME
+    # ========================================================
+
+    try:
+
+        qqq = check_qqq_bull()
+
+    except Exception as e:
 
         print(
-            "ERROR: Αποτυχία λήψης tickers. Τερματισμός."
+            f"QQQ ERROR: {e}"
         )
 
         return
 
     print(
-        f"Λήψη δεδομένων για {len(tickers)} μετοχές..."
+        f"QQQ Close: ${qqq['Close']:.2f}"
     )
 
-    # --------------------------------------------------------
-    # YAHOO FINANCE
-    # --------------------------------------------------------
+    print(
+        f"QQQ SMA200: ${qqq['SMA200']:.2f}"
+    )
+
+    # ========================================================
+    # BEAR MARKET = NO LONG TRADES
+    # ========================================================
+
+    if not qqq["Bull"]:
+
+        message = (
+            "📊 *Daily Pullback Scanner V8*\n\n"
+            "🔴 *NO LONG TRADES TODAY*\n\n"
+            f"QQQ: ${qqq['Close']:.2f}\n"
+            f"SMA200: ${qqq['SMA200']:.2f}\n\n"
+            "Το QQQ βρίσκεται κάτω από τον SMA200.\n"
+            "Η V8 στρατηγική επιτρέπει long setups "
+            "μόνο σε BULL regime."
+        )
+
+        send_telegram_message(
+            message,
+            BOT_TOKEN,
+            CHAT_ID
+        )
+
+        print(
+            "QQQ BEAR regime. No trades."
+        )
+
+        return
+
+    print(
+        "QQQ BULL regime ✅"
+    )
+
+    # ========================================================
+    # DOWNLOAD STOCK DATA
+    # ========================================================
+
+    print()
+
+    print(
+        f"Downloading {len(TICKERS)} stocks..."
+    )
 
     try:
 
         all_data = yf.download(
-            tickers,
+            TICKERS,
             period="2y",
+            interval="1d",
             group_by="ticker",
             progress=False,
-            auto_adjust=False,
+            auto_adjust=True,
+            repair=True,
             threads=True
         )
 
     except Exception as e:
 
         print(
-            f"ERROR: yfinance download failed: "
+            f"DOWNLOAD ERROR: "
             f"{type(e).__name__}: {e}"
         )
 
         return
 
-    # --------------------------------------------------------
-    # SCREENING
-    # --------------------------------------------------------
+    setups = []
 
-    results = []
+    # ========================================================
+    # SCREEN EACH TICKER
+    # ========================================================
 
-    for ticker in tickers:
+    for ticker in TICKERS:
 
         try:
 
-            # -----------------------------------------------
-            # GET DATA FOR TICKER
-            # -----------------------------------------------
+            # Already owned/open
+            if ticker in open_positions:
+                continue
 
-            if ticker not in all_data.columns.get_level_values(0):
-
-                print(
-                    f"{ticker}: Δεν υπάρχουν δεδομένα."
-                )
+            if (
+                ticker
+                not in
+                all_data.columns.get_level_values(0)
+            ):
 
                 continue
 
-            df = all_data[ticker].copy()
+            df = (
+                all_data[ticker]
+                .copy()
+            )
 
-            df.dropna(inplace=True)
+            df.dropna(
+                inplace=True
+            )
 
-            if df.empty or len(df) < 200:
-
-                print(
-                    f"{ticker}: Ανεπαρκή δεδομένα."
-                )
+            if len(df) < 220:
 
                 continue
 
-            # -----------------------------------------------
+            # =================================================
             # INDICATORS
-            # -----------------------------------------------
+            # =================================================
 
-            # SMA 200
-
-            df["SMA_200"] = (
+            df["SMA200"] = (
                 df["Close"]
-                .rolling(window=200)
+                .rolling(200)
                 .mean()
             )
 
-            # SMA 50
-
-            df["SMA_50"] = (
+            df["SMA50"] = (
                 df["Close"]
-                .rolling(window=50)
+                .rolling(50)
                 .mean()
             )
 
-            # EMA 20
-
-            df["EMA_20"] = (
+            df["EMA20"] = (
                 df["Close"]
                 .ewm(
                     span=20,
@@ -383,318 +590,711 @@ def main():
                 .mean()
             )
 
-            # Average Volume 20
-
-            df["Avg_Vol_20"] = (
-                df["Volume"]
-                .rolling(window=20)
-                .mean()
+            df["RSI14"] = (
+                calculate_rsi(
+                    df["Close"]
+                )
             )
 
-            # -----------------------------------------------
-            # RSI 14
-            # -----------------------------------------------
-
-            delta = df["Close"].diff()
-
-            gain = delta.where(
-                delta > 0,
-                0
+            df["ATR14"] = (
+                calculate_atr(
+                    df,
+                    ATR_PERIOD
+                )
             )
 
-            loss = -delta.where(
-                delta < 0,
-                0
-            )
-
-            avg_gain = gain.ewm(
-                alpha=1 / 14,
-                adjust=False
-            ).mean()
-
-            avg_loss = loss.ewm(
-                alpha=1 / 14,
-                adjust=False
-            ).mean()
-
-            rs = avg_gain / avg_loss
-
-            df["RSI_14"] = (
-                100 - (100 / (1 + rs))
-            )
-
-            # -----------------------------------------------
+            # =================================================
             # LATEST COMPLETED CANDLE
-            # -----------------------------------------------
+            # =================================================
 
-            signal_index = len(df) - 1
+            latest = df.iloc[-1]
 
-            latest = df.iloc[signal_index]
+            open_price = float(
+                latest["Open"]
+            )
 
-            price = float(latest["Close"])
-            high = float(latest["High"])
-            low = float(latest["Low"])
-            volume = float(latest["Volume"])
-            avg_vol = float(latest["Avg_Vol_20"])
+            close = float(
+                latest["Close"]
+            )
 
-            sma200 = float(latest["SMA_200"])
-            sma50 = float(latest["SMA_50"])
-            ema20 = float(latest["EMA_20"])
-            rsi = float(latest["RSI_14"])
+            high = float(
+                latest["High"]
+            )
 
-            # -----------------------------------------------
-            # CHECK NaN
-            # -----------------------------------------------
+            low = float(
+                latest["Low"]
+            )
 
-            if any(
-                pd.isna(x)
-                for x in [
-                    price,
-                    high,
-                    low,
-                    volume,
-                    avg_vol,
-                    sma200,
-                    sma50,
-                    ema20,
-                    rsi
+            sma200 = float(
+                latest["SMA200"]
+            )
+
+            sma50 = float(
+                latest["SMA50"]
+            )
+
+            ema20 = float(
+                latest["EMA20"]
+            )
+
+            rsi = float(
+                latest["RSI14"]
+            )
+
+            atr = float(
+                latest["ATR14"]
+            )
+
+            old_sma50 = float(
+                df["SMA50"].iloc[
+                    -1
+                    - SMA50_SLOPE_LOOKBACK
                 ]
+            )
+
+            values = [
+                open_price,
+                close,
+                high,
+                low,
+                sma200,
+                sma50,
+                ema20,
+                old_sma50,
+                rsi,
+                atr
+            ]
+
+            if (
+                any(
+                    pd.isna(x)
+                    for x in values
+                )
+                or atr <= 0
             ):
+
                 continue
 
             # =================================================
-            # EXISTING BUSINESS LOGIC
+            # FILTER 1:
+            # Price > SMA200
             # =================================================
 
-            # -----------------------------------------------
-            # 1. LONG-TERM TREND
-            # Price must be above SMA200
-            # -----------------------------------------------
-
-            if price < sma200:
+            if close <= sma200:
                 continue
 
-            # -----------------------------------------------
-            # 2. RSI PULLBACK
-            # -----------------------------------------------
+            # =================================================
+            # FILTER 2:
+            # EMA20 > SMA50
+            # =================================================
 
-            if not (35 <= rsi <= 55):
+            if ema20 <= sma50:
                 continue
 
-            # -----------------------------------------------
-            # 3. PULLBACK TO EMA20 OR SMA50
-            # Tolerance = 1%
-            # -----------------------------------------------
+            # =================================================
+            # FILTER 3:
+            # SMA50 rising
+            # =================================================
+
+            if sma50 <= old_sma50:
+                continue
+
+            # =================================================
+            # FILTER 4:
+            # RSI 35 - 55
+            # =================================================
+
+            if not (
+                RSI_MIN
+                <= rsi
+                <= RSI_MAX
+            ):
+
+                continue
+
+            # =================================================
+            # FILTER 5:
+            # Pullback to EMA20 / SMA50
+            # =================================================
 
             touched_ema20 = (
-                ema20 * 0.99
+                ema20
+                * (
+                    1
+                    - SUPPORT_TOLERANCE
+                )
                 <= low
-                <= ema20 * 1.01
+                <=
+                ema20
+                * (
+                    1
+                    + SUPPORT_TOLERANCE
+                )
             )
 
             touched_sma50 = (
-                sma50 * 0.99
+                sma50
+                * (
+                    1
+                    - SUPPORT_TOLERANCE
+                )
                 <= low
-                <= sma50 * 1.01
-            )
-
-            # -----------------------------------------------
-            # Price must close above support
-            # -----------------------------------------------
-
-            closed_above = (
-                price >= ema20
-                or price >= sma50
+                <=
+                sma50
+                * (
+                    1
+                    + SUPPORT_TOLERANCE
+                )
             )
 
             if not (
-                (touched_ema20 or touched_sma50)
-                and closed_above
+                touched_ema20
+                or touched_sma50
             ):
+
                 continue
 
-            # -----------------------------------------------
-            # 4. VOLUME
-            # -----------------------------------------------
-
-            if volume > avg_vol:
-                vol_status = "High 🟢"
-            else:
-                vol_status = "Avg ⚪"
-
             # =================================================
-            # NEW SWING TRADE LOGIC
+            # FILTER 6:
+            # Close above support
             # =================================================
 
-            # -----------------------------------------------
-            # 5. ENTRY
-            # Signal High + $0.15
-            # -----------------------------------------------
+            if not (
+                close >= ema20
+                or
+                close >= sma50
+            ):
 
-            entry = high + ENTRY_BUFFER
+                continue
 
-            # -----------------------------------------------
-            # 6. PREVIOUS SWING LOW
-            # -----------------------------------------------
+            # =================================================
+            # FILTER 7:
+            # Green candle
+            # =================================================
 
-            swing_low = find_previous_swing_low(
-                df,
-                signal_index
+            if close <= open_price:
+                continue
+
+            # =================================================
+            # FILTER 8:
+            # Close in upper half
+            # =================================================
+
+            candle_range = (
+                high - low
+            )
+
+            if candle_range <= 0:
+                continue
+
+            candle_midpoint = (
+                low
+                + 0.5
+                * candle_range
+            )
+
+            if close <= candle_midpoint:
+                continue
+
+            # =================================================
+            # ENTRY
+            #
+            # Signal High + 0.10 ATR
+            # =================================================
+
+            raw_entry = (
+                high
+                +
+                ENTRY_ATR_BUFFER
+                * atr
+            )
+
+            # =================================================
+            # SWING LOW
+            # =================================================
+
+            swing_low = (
+                find_previous_swing_low(
+                    df
+                )
             )
 
             if swing_low is None:
-                print(
-                    f"{ticker}: Δεν βρέθηκε Swing Low."
-                )
                 continue
 
-            # -----------------------------------------------
-            # 7. STOP LOSS
+            # =================================================
+            # STOP LOSS
             #
-            # Below the recent swing low.
-            # -----------------------------------------------
+            # Swing Low - 0.10 ATR
+            # =================================================
 
-            sl = swing_low - SL_BUFFER
-
-            # -----------------------------------------------
-            # Safety:
-            # SL must be below Entry.
-            # -----------------------------------------------
-
-            if sl >= entry:
-                print(
-                    f"{ticker}: Invalid SL."
-                )
-                continue
-
-            # -----------------------------------------------
-            # 8. PREVIOUS SWING HIGH
-            # -----------------------------------------------
-
-            swing_high = find_previous_swing_high(
-                df,
-                signal_index
+            raw_sl = (
+                swing_low
+                -
+                SL_ATR_BUFFER
+                * atr
             )
 
-            if swing_high is None:
-                print(
-                    f"{ticker}: Δεν βρέθηκε Swing High."
-                )
+            technical_risk = (
+                raw_entry
+                - raw_sl
+            )
+
+            if technical_risk <= 0:
                 continue
 
-            # -----------------------------------------------
-            # 9. TAKE PROFIT
-            #
-            # Previous Swing High
-            # -----------------------------------------------
+            # =================================================
+            # MINIMUM STOP = 0.50 ATR
+            # =================================================
 
-            tp = swing_high
+            if technical_risk < (
+                MIN_STOP_ATR
+                * atr
+            ):
 
-            # -----------------------------------------------
-            # TP must be above Entry
-            # -----------------------------------------------
-
-            if tp <= entry:
-                print(
-                    f"{ticker}: Previous Swing High "
-                    f"is below Entry."
-                )
                 continue
 
-            # -----------------------------------------------
-            # 10. RISK
-            # -----------------------------------------------
+            # =================================================
+            # TAKE PROFIT = FIXED 2R
+            # =================================================
 
-            risk = entry - sl
+            raw_tp = (
+                raw_entry
+                +
+                2.0
+                * technical_risk
+            )
 
-            # -----------------------------------------------
-            # 11. REWARD
-            # -----------------------------------------------
+            # =================================================
+            # QUALITY SCORE
+            # =================================================
 
-            reward = tp - entry
-
-            # -----------------------------------------------
-            # 12. RISK / REWARD
-            # -----------------------------------------------
-
-            rr = reward / risk
-
-            # -----------------------------------------------
-            # 13. MINIMUM R:R FILTER
-            # -----------------------------------------------
-
-            if rr < MIN_RR:
-                print(
-                    f"{ticker}: R:R too low "
-                    f"({rr:.2f})"
+            score = (
+                calculate_quality_score(
+                    close,
+                    high,
+                    low,
+                    ema20,
+                    sma50,
+                    old_sma50,
+                    atr
                 )
-                continue
+            )
 
-            # -----------------------------------------------
-            # 14. ADD RESULT
-            # -----------------------------------------------
-
-            results.append(
+            setups.append(
                 {
-                    "Ticker": ticker,
-                    "Price": round(price, 2),
-                    "High": round(high, 2),
-                    "Low": round(low, 2),
+                    "Ticker":
+                        ticker,
 
-                    "RSI": round(rsi, 2),
-                    "EMA20": round(ema20, 2),
-                    "SMA50": round(sma50, 2),
+                    "Price":
+                        close,
 
-                    "Vol_Status": vol_status,
+                    "High":
+                        high,
 
-                    "Swing_Low": round(swing_low, 2),
-                    "Swing_High": round(swing_high, 2),
+                    "Low":
+                        low,
 
-                    "Entry": round(entry, 2),
-                    "SL": round(sl, 2),
-                    "TP": round(tp, 2),
+                    "ATR":
+                        atr,
 
-                    "Risk": round(risk, 2),
-                    "Reward": round(reward, 2),
-                    "RR": round(rr, 2)
+                    "RSI":
+                        rsi,
+
+                    "EMA20":
+                        ema20,
+
+                    "SMA50":
+                        sma50,
+
+                    "Entry":
+                        raw_entry,
+
+                    "SL":
+                        raw_sl,
+
+                    "TP":
+                        raw_tp,
+
+                    "Risk_Per_Share":
+                        technical_risk,
+
+                    "Quality_Score":
+                        score[
+                            "Quality_Score"
+                        ],
+
+                    "Slope_Score":
+                        score[
+                            "Slope_Score"
+                        ],
+
+                    "EMA_Strength":
+                        score[
+                            "EMA_Strength"
+                        ],
+
+                    "Close_Location":
+                        score[
+                            "Close_Location"
+                        ]
                 }
-            )
-
-            print(
-                f"FOUND: {ticker} | "
-                f"Entry={entry:.2f} | "
-                f"SL={sl:.2f} | "
-                f"TP={tp:.2f} | "
-                f"R:R=1:{rr:.2f}"
             )
 
         except Exception as e:
 
             print(
-                f"ERROR στο {ticker}: "
+                f"ERROR {ticker}: "
                 f"{type(e).__name__}: {e}"
             )
 
             continue
 
-    # --------------------------------------------------------
-    # RESULTS
-    # --------------------------------------------------------
+    # ========================================================
+    # NO SETUPS
+    # ========================================================
+
+    if not setups:
+
+        message = (
+            "📊 *Daily Pullback Scanner V8*\n\n"
+            "🟢 QQQ BULL regime\n\n"
+            "Δεν βρέθηκε valid setup σήμερα."
+        )
+
+        send_telegram_message(
+            message,
+            BOT_TOKEN,
+            CHAT_ID
+        )
+
+        print(
+            "No valid setups."
+        )
+
+        return
+
+    # ========================================================
+    # RANK BEST SETUPS
+    # ========================================================
+
+    setups = sorted(
+        setups,
+        key=lambda x:
+        x["Quality_Score"],
+        reverse=True
+    )
+
+    # We can only take as many as free portfolio slots
+    setups = setups[
+        :available_slots
+    ]
+
+    # ========================================================
+    # POSITION SIZING
+    # ========================================================
+
+    risk_budget = (
+        account_equity
+        * RISK_PER_TRADE
+    )
+
+    remaining_cash = (
+        available_cash
+    )
+
+    final_setups = []
+
+    for setup in setups:
+
+        entry = (
+            setup["Entry"]
+        )
+
+        sl = (
+            setup["SL"]
+        )
+
+        # -----------------------------------------------
+        # Simulated fills
+        # -----------------------------------------------
+
+        entry_fill = (
+            entry
+            * (
+                1
+                + SLIPPAGE_PCT
+            )
+        )
+
+        stop_fill = (
+            sl
+            * (
+                1
+                - SLIPPAGE_PCT
+            )
+        )
+
+        real_risk_per_share = (
+            entry_fill
+            - stop_fill
+        )
+
+        if real_risk_per_share <= 0:
+            continue
+
+        # -----------------------------------------------
+        # Shares based on 0.5% account risk
+        # -----------------------------------------------
+
+        shares_by_risk = (
+            risk_budget
+            / real_risk_per_share
+        )
+
+        # -----------------------------------------------
+        # Shares based on remaining cash
+        # -----------------------------------------------
+
+        effective_cost_per_share = (
+            entry_fill
+            * (
+                1
+                + COMMISSION_PCT
+            )
+        )
+
+        shares_by_cash = (
+            remaining_cash
+            / effective_cost_per_share
+        )
+
+        shares = min(
+            shares_by_risk,
+            shares_by_cash
+        )
+
+        shares = np.floor(
+            shares
+            / MIN_SHARE_SIZE
+        ) * MIN_SHARE_SIZE
+
+        if shares < MIN_SHARE_SIZE:
+            continue
+
+        position_value = (
+            shares
+            * entry_fill
+        )
+
+        entry_commission = (
+            position_value
+            * COMMISSION_PCT
+        )
+
+        cash_required = (
+            position_value
+            + entry_commission
+        )
+
+        actual_risk = (
+            shares
+            * real_risk_per_share
+        )
+
+        # -----------------------------------------------
+        # Reduce remaining simulated cash
+        # -----------------------------------------------
+
+        remaining_cash -= (
+            cash_required
+        )
+
+        setup[
+            "Shares"
+        ] = (
+            shares
+        )
+
+        setup[
+            "Position_Value"
+        ] = (
+            position_value
+        )
+
+        setup[
+            "Planned_Risk"
+        ] = (
+            actual_risk
+        )
+
+        setup[
+            "Risk_Pct"
+        ] = (
+            actual_risk
+            / account_equity
+            * 100
+        )
+
+        final_setups.append(
+            setup
+        )
+
+        if remaining_cash <= 0:
+            break
+
+    # ========================================================
+    # NO AFFORDABLE SETUPS
+    # ========================================================
+
+    if not final_setups:
+
+        message = (
+            "📊 *Daily Pullback Scanner V8*\n\n"
+            "🟢 QQQ BULL regime\n\n"
+            "Υπάρχουν τεχνικά setups, "
+            "αλλά δεν υπάρχει αρκετό διαθέσιμο cash "
+            "για σωστό position sizing."
+        )
+
+        send_telegram_message(
+            message,
+            BOT_TOKEN,
+            CHAT_ID
+        )
+
+        return
+
+    # ========================================================
+    # TELEGRAM OUTPUT
+    # ========================================================
+
+    message = (
+        "📊 *Daily Pullback Scanner V8*\n\n"
+        "🟢 *QQQ BULL REGIME*\n"
+        f"QQQ: ${qqq['Close']:.2f}\n"
+        f"QQQ SMA200: ${qqq['SMA200']:.2f}\n\n"
+        f"💼 Account: ${account_equity:.2f}\n"
+        f"💵 Available cash: ${available_cash:.2f}\n"
+        f"🎯 Risk/trade: {RISK_PER_TRADE * 100:.2f}% "
+        f"(≈ ${risk_budget:.2f})\n"
+        f"📌 Free slots: {available_slots}/{MAX_OPEN_POSITIONS}\n\n"
+    )
+
+    for rank, setup in enumerate(
+        final_setups,
+        start=1
+    ):
+
+        message += (
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 *#{rank} {setup['Ticker']}*\n\n"
+
+            f"Score: *{setup['Quality_Score']:.2f}*\n"
+            f"RSI: {setup['RSI']:.2f}\n"
+            f"ATR: ${setup['ATR']:.2f}\n\n"
+
+            f"🎯 *ENTRY:* ${setup['Entry']:.2f}\n"
+            f"🛑 *SL:* ${setup['SL']:.2f}\n"
+            f"💰 *TP 2R:* ${setup['TP']:.2f}\n\n"
+
+            f"📦 Shares: *{setup['Shares']:.4f}*\n"
+            f"💵 Position: ≈ ${setup['Position_Value']:.2f}\n"
+            f"⚠️ Planned risk: ≈ ${setup['Planned_Risk']:.2f} "
+            f"({setup['Risk_Pct']:.2f}%)\n\n"
+        )
+
+    message += (
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 *Execution rule*\n"
+        "Entry μόνο αν η τιμή φτάσει το Entry.\n"
+        "Αν δεν ενεργοποιηθεί μέσα σε 3 trading days, "
+        "το setup ακυρώνεται.\n\n"
+        "Αν μπεις:\n"
+        "• SL στο αναγραφόμενο επίπεδο\n"
+        "• TP στο Fixed 2R\n"
+        "• Max holding: 10 trading days\n\n"
+        "⚠️ Paper trading phase — όχι ακόμη validated για live capital."
+    )
+
+    # ========================================================
+    # TELEGRAM CHARACTER LIMIT
+    # ========================================================
+
+    if len(message) <= 4000:
+
+        send_telegram_message(
+            message,
+            BOT_TOKEN,
+            CHAT_ID
+        )
+
+    else:
+
+        # Very unlikely with max 3 setups,
+        # but included for safety.
+
+        chunks = []
+
+        current = ""
+
+        for line in message.split("\n"):
+
+            if (
+                len(current)
+                + len(line)
+                + 1
+                > 3900
+            ):
+
+                chunks.append(
+                    current
+                )
+
+                current = ""
+
+            current += (
+                line
+                + "\n"
+            )
+
+        if current:
+
+            chunks.append(
+                current
+            )
+
+        for chunk in chunks:
+
+            send_telegram_message(
+                chunk,
+                BOT_TOKEN,
+                CHAT_ID
+            )
+
+            time.sleep(1)
+
+    # ========================================================
+    # TERMINAL OUTPUT
+    # ========================================================
+
+    print()
 
     print(
-        f"Screening ολοκληρώθηκε. "
-        f"Βρέθηκαν {len(results)} valid setups."
+        f"Found {len(final_setups)} final setups."
     )
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
+    for setup in final_setups:
 
-    send_telegram_chunks(
-        results,
-        BOT_TOKEN,
-        CHAT_ID
-    )
+        print(
+            f"{setup['Ticker']} | "
+            f"Score={setup['Quality_Score']:.2f} | "
+            f"Entry={setup['Entry']:.2f} | "
+            f"SL={setup['SL']:.2f} | "
+            f"TP={setup['TP']:.2f} | "
+            f"Shares={setup['Shares']:.4f} | "
+            f"Risk=${setup['Planned_Risk']:.2f}"
+        )
 
 
 # ============================================================
