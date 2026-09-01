@@ -24,30 +24,37 @@ TICKERS = [
 
 
 # ============================================================
-# STRATEGY PARAMETERS
+# STRATEGY PARAMETERS - V6
 # ============================================================
-
-ENTRY_BUFFER = 0.15
-ENTRY_VALID_DAYS = 3
-MAX_HOLDING_DAYS = 10
 
 SWING_LOOKBACK = 3
 
 ATR_PERIOD = 14
-ATR_SL_BUFFER = 0.10
+
+# Entry = signal High + 10% ATR
+ENTRY_ATR_BUFFER = 0.10
+
+# SL = Swing Low - 10% ATR
+SL_ATR_BUFFER = 0.10
+
+# Entry -> SL must be at least 0.50 ATR
 MIN_STOP_ATR = 0.50
 
-MIN_SWING_RR = 2.0
+# Signal remains valid for 3 sessions
+ENTRY_VALID_DAYS = 3
 
+# Trade can remain open for 10 sessions
+MAX_HOLDING_DAYS = 10
 
-# ============================================================
-# OUT-OF-SAMPLE SPLIT
-#
-# Anything BEFORE 2025 = development
-# 2025 onwards = out-of-sample
-# ============================================================
+# Trend slope
+SMA50_SLOPE_LOOKBACK = 10
 
-TEST_START = pd.Timestamp("2025-01-01")
+# RSI
+RSI_MIN = 35
+RSI_MAX = 55
+
+# Pullback proximity
+SUPPORT_TOLERANCE = 0.01
 
 
 # ============================================================
@@ -58,8 +65,15 @@ def calculate_rsi(series, period=14):
 
     delta = series.diff()
 
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    gain = delta.where(
+        delta > 0,
+        0.0
+    )
+
+    loss = -delta.where(
+        delta < 0,
+        0.0
+    )
 
     avg_gain = gain.ewm(
         alpha=1 / period,
@@ -84,16 +98,14 @@ def calculate_atr(df, period=14):
 
     previous_close = df["Close"].shift(1)
 
-    ranges = pd.concat(
+    true_range = pd.concat(
         [
             df["High"] - df["Low"],
             (df["High"] - previous_close).abs(),
             (df["Low"] - previous_close).abs()
         ],
         axis=1
-    )
-
-    true_range = ranges.max(axis=1)
+    ).max(axis=1)
 
     return true_range.ewm(
         alpha=1 / period,
@@ -102,7 +114,7 @@ def calculate_atr(df, period=14):
 
 
 # ============================================================
-# SWING LOW
+# PREVIOUS CONFIRMED SWING LOW
 # ============================================================
 
 def find_previous_swing_low(df, signal_index):
@@ -145,53 +157,14 @@ def find_previous_swing_low(df, signal_index):
 
 
 # ============================================================
-# SWING HIGH
-# ============================================================
-
-def find_previous_swing_high(df, signal_index):
-
-    latest_candidate = (
-        signal_index
-        - SWING_LOOKBACK
-        - 1
-    )
-
-    if latest_candidate < SWING_LOOKBACK:
-        return None
-
-    for i in range(
-        latest_candidate,
-        SWING_LOOKBACK - 1,
-        -1
-    ):
-
-        current = float(
-            df["High"].iloc[i]
-        )
-
-        left = df["High"].iloc[
-            i - SWING_LOOKBACK:i
-        ]
-
-        right = df["High"].iloc[
-            i + 1:i + SWING_LOOKBACK + 1
-        ]
-
-        if (
-            current > float(left.max())
-            and
-            current > float(right.max())
-        ):
-            return current
-
-    return None
-
-
-# ============================================================
 # FIND ENTRY
 # ============================================================
 
-def find_entry(df, signal_index, entry):
+def find_entry(
+    df,
+    signal_index,
+    entry
+):
 
     last_index = min(
         signal_index + ENTRY_VALID_DAYS,
@@ -203,7 +176,11 @@ def find_entry(df, signal_index, entry):
         last_index + 1
     ):
 
-        if float(df["High"].iloc[i]) >= entry:
+        day_high = float(
+            df["High"].iloc[i]
+        )
+
+        if day_high >= entry:
             return i
 
     return None
@@ -221,10 +198,16 @@ def simulate_fixed_2r(
 ):
 
     risk = entry - sl
-    target = entry + 2 * risk
+
+    target = (
+        entry
+        + 2.0 * risk
+    )
 
     last_index = min(
-        entry_index + MAX_HOLDING_DAYS - 1,
+        entry_index
+        + MAX_HOLDING_DAYS
+        - 1,
         len(df) - 1
     )
 
@@ -233,17 +216,29 @@ def simulate_fixed_2r(
         last_index + 1
     ):
 
-        high = float(df["High"].iloc[i])
-        low = float(df["Low"].iloc[i])
+        high = float(
+            df["High"].iloc[i]
+        )
 
-        # Conservative:
-        # if TP and SL appear in same daily candle -> SL first
+        low = float(
+            df["Low"].iloc[i]
+        )
 
+        # Daily ambiguity:
+        # if SL and TP both touched -> assume SL first
         if low <= sl:
-            return -1.0, i, "SL"
+            return {
+                "R": -1.0,
+                "Exit_Index": i,
+                "Result": "SL"
+            }
 
         if high >= target:
-            return 2.0, i, "TP"
+            return {
+                "R": 2.0,
+                "Exit_Index": i,
+                "Result": "TP"
+            }
 
     exit_price = float(
         df["Close"].iloc[last_index]
@@ -253,36 +248,42 @@ def simulate_fixed_2r(
         exit_price - entry
     ) / risk
 
-    return r, last_index, "TIME"
+    return {
+        "R": r,
+        "Exit_Index": last_index,
+        "Result": "TIME"
+    }
 
 
 # ============================================================
-# PARTIAL STRATEGY
-#
-# 50% at 2R
-# Remaining 50% at RUNNER_R
-#
-# breakeven_after_tp1:
-# False -> original SL remains
-# True  -> remaining 50% SL moves to entry
+# 50% @ 2R
+# 50% @ 4R
+# MOVE SECOND HALF TO BREAKEVEN AFTER TP1
 # ============================================================
 
-def simulate_partial(
+def simulate_partial_2r_4r_be(
     df,
     entry_index,
     entry,
-    sl,
-    runner_r,
-    breakeven_after_tp1
+    sl
 ):
 
     risk = entry - sl
 
-    tp1 = entry + 2 * risk
-    tp2 = entry + runner_r * risk
+    tp1 = (
+        entry
+        + 2.0 * risk
+    )
+
+    tp2 = (
+        entry
+        + 4.0 * risk
+    )
 
     last_index = min(
-        entry_index + MAX_HOLDING_DAYS - 1,
+        entry_index
+        + MAX_HOLDING_DAYS
+        - 1,
         len(df) - 1
     )
 
@@ -293,8 +294,13 @@ def simulate_partial(
         last_index + 1
     ):
 
-        high = float(df["High"].iloc[i])
-        low = float(df["Low"].iloc[i])
+        high = float(
+            df["High"].iloc[i]
+        )
+
+        low = float(
+            df["Low"].iloc[i]
+        )
 
         # ====================================================
         # BEFORE TP1
@@ -302,36 +308,35 @@ def simulate_partial(
 
         if not tp1_hit:
 
-            # Daily candle ambiguity:
-            # SL and TP1 both appear -> assume SL first
-
+            # Conservative daily assumption
             if low <= sl:
-                return -1.0, i, "SL_BEFORE_TP1", False
+
+                return {
+                    "R": -1.0,
+                    "Exit_Index": i,
+                    "Result": "SL_BEFORE_TP1",
+                    "Hit_2R": False,
+                    "Hit_4R": False
+                }
 
             if high >= tp1:
 
                 tp1_hit = True
 
-                # First half:
-                # 50% × +2R = +1R
-
-                # If TP2 was also reached in same candle,
-                # no SL was hit, therefore allow full target.
-
+                # Same candle reaches 4R too
                 if high >= tp2:
 
-                    total_r = (
-                        1.0
-                        +
-                        0.5 * runner_r
-                    )
+                    # 50% × 2R = +1R
+                    # 50% × 4R = +2R
+                    # Total = +3R
 
-                    return (
-                        total_r,
-                        i,
-                        "FULL_TARGET",
-                        True
-                    )
+                    return {
+                        "R": 3.0,
+                        "Exit_Index": i,
+                        "Result": "FULL_TARGET",
+                        "Hit_2R": True,
+                        "Hit_4R": True
+                    }
 
                 continue
 
@@ -339,63 +344,35 @@ def simulate_partial(
         # AFTER TP1
         # ====================================================
 
-        if tp1_hit:
+        else:
 
-            current_stop = (
-                entry
-                if breakeven_after_tp1
-                else sl
-            )
+            # Remaining 50% now has stop at Entry
 
-            # Same candle touches stop and TP2.
-            # Conservative = stop first.
+            # Conservative:
+            # if BE and TP2 occur in same candle -> BE first
+            if low <= entry:
 
-            if low <= current_stop:
+                # First half already banked +1R
+                # Second half exits 0R
+                # Total = +1R
 
-                if breakeven_after_tp1:
-
-                    # First 50%:
-                    # +1R
-                    #
-                    # Remaining:
-                    # 0R
-                    #
-                    # Total = +1R
-
-                    return (
-                        1.0,
-                        i,
-                        "TP1_THEN_BE",
-                        True
-                    )
-
-                else:
-
-                    # First half = +1R
-                    # second half = -0.5R
-                    # Total = +0.5R
-
-                    return (
-                        0.5,
-                        i,
-                        "TP1_THEN_SL",
-                        True
-                    )
+                return {
+                    "R": 1.0,
+                    "Exit_Index": i,
+                    "Result": "TP1_THEN_BE",
+                    "Hit_2R": True,
+                    "Hit_4R": False
+                }
 
             if high >= tp2:
 
-                total_r = (
-                    1.0
-                    +
-                    0.5 * runner_r
-                )
-
-                return (
-                    total_r,
-                    i,
-                    "FULL_TARGET",
-                    True
-                )
+                return {
+                    "R": 3.0,
+                    "Exit_Index": i,
+                    "Result": "FULL_TARGET",
+                    "Hit_2R": True,
+                    "Hit_4R": True
+                }
 
     # ========================================================
     # TIME EXIT
@@ -411,35 +388,43 @@ def simulate_partial(
 
     if not tp1_hit:
 
-        return (
-            current_r,
-            last_index,
-            "TIME_BEFORE_TP1",
-            False
-        )
+        return {
+            "R": current_r,
+            "Exit_Index": last_index,
+            "Result": "TIME_BEFORE_TP1",
+            "Hit_2R": False,
+            "Hit_4R": False
+        }
 
-    # First half already made +1R.
-    # Remaining half exits at current R.
+    # Half already sold at +2R:
+    #
+    # 0.5 × 2R = +1R
+    #
+    # remaining 50%:
+    # 0.5 × current R
 
     total_r = (
         1.0
-        +
-        0.5 * current_r
+        + 0.5 * current_r
     )
 
-    return (
-        total_r,
-        last_index,
-        "TP1_THEN_TIME",
-        True
-    )
+    return {
+        "R": total_r,
+        "Exit_Index": last_index,
+        "Result": "TP1_THEN_TIME",
+        "Hit_2R": True,
+        "Hit_4R": False
+    }
 
 
 # ============================================================
-# PERFORMANCE
+# PERFORMANCE STATS
 # ============================================================
 
-def calculate_stats(df, r_col):
+def calculate_stats(
+    df,
+    r_column
+):
 
     if df.empty:
 
@@ -454,21 +439,33 @@ def calculate_stats(df, r_col):
             "Max_Consecutive_Losses": 0
         }
 
-    r = df[r_col]
+    r = df[r_column]
 
-    positive = r[r > 0]
-    negative = r[r < 0]
+    positive = r[
+        r > 0
+    ]
 
-    gross_profit = positive.sum()
-    gross_loss = abs(negative.sum())
+    negative = r[
+        r < 0
+    ]
 
-    pf = (
+    gross_profit = (
+        positive.sum()
+    )
+
+    gross_loss = abs(
+        negative.sum()
+    )
+
+    profit_factor = (
         gross_profit / gross_loss
         if gross_loss > 0
         else np.inf
     )
 
-    cumulative = r.cumsum()
+    cumulative = (
+        r.cumsum()
+    )
 
     peak = (
         cumulative
@@ -476,11 +473,15 @@ def calculate_stats(df, r_col):
         .cummax()
     )
 
-    drawdown = cumulative - peak
+    drawdown = (
+        cumulative - peak
+    )
 
-    max_dd = drawdown.min()
+    max_drawdown = (
+        drawdown.min()
+    )
 
-    max_losses = 0
+    max_consecutive_losses = 0
     current_losses = 0
 
     for value in r:
@@ -489,8 +490,8 @@ def calculate_stats(df, r_col):
 
             current_losses += 1
 
-            max_losses = max(
-                max_losses,
+            max_consecutive_losses = max(
+                max_consecutive_losses,
                 current_losses
             )
 
@@ -515,46 +516,39 @@ def calculate_stats(df, r_col):
             r.median(),
 
         "Profit_Factor":
-            pf,
+            profit_factor,
 
         "Max_Drawdown_R":
-            max_dd,
+            max_drawdown,
 
         "Max_Consecutive_Losses":
-            max_losses
+            max_consecutive_losses
     }
 
 
 # ============================================================
-# COMPARISON TABLE
+# BUILD STRATEGY COMPARISON
 # ============================================================
 
-def build_comparison(trades):
+def build_comparison(
+    trades
+):
 
-    strategies = {
-        "Fixed 2R":
-            "Fixed2_R",
+    return pd.DataFrame(
+        {
+            "Fixed 2R":
+                calculate_stats(
+                    trades,
+                    "Fixed2_R"
+                ),
 
-        "50% 2R + 50% 4R / Original SL":
-            "Partial4_SL_R",
-
-        "50% 2R + 50% 4R / Breakeven":
-            "Partial4_BE_R",
-
-        "50% 2R + 50% 5R / Breakeven":
-            "Partial5_BE_R"
-    }
-
-    rows = {}
-
-    for name, column in strategies.items():
-
-        rows[name] = calculate_stats(
-            trades,
-            column
-        )
-
-    return pd.DataFrame(rows).T
+            "50% 2R + 50% 4R / BE":
+                calculate_stats(
+                    trades,
+                    "Partial_R"
+                )
+        }
+    ).T
 
 
 # ============================================================
@@ -563,26 +557,36 @@ def build_comparison(trades):
 
 def main():
 
-    print("=" * 90)
-    print("PULLBACK BACKTEST V5 - RUNNER + BREAKEVEN + OUT-OF-SAMPLE")
-    print("=" * 90)
+    print("=" * 100)
 
-    print()
-    print("Strategies:")
-    print("A) Fixed 2R")
-    print("B) 50% @ 2R + 50% @ 4R | Original SL")
-    print("C) 50% @ 2R + 50% @ 4R | Breakeven after TP1")
-    print("D) 50% @ 2R + 50% @ 5R | Breakeven after TP1")
+    print(
+        "PULLBACK BACKTEST V6 - TREND QUALITY + ATR ENTRY + WALK-FORWARD"
+    )
+
+    print("=" * 100)
+
     print()
 
     print(
-        f"Out-of-sample starts: {TEST_START.date()}"
+        f"Entry: High + {ENTRY_ATR_BUFFER:.2f} ATR"
+    )
+
+    print(
+        f"SL: Swing Low - {SL_ATR_BUFFER:.2f} ATR"
+    )
+
+    print(
+        f"Minimum stop distance: {MIN_STOP_ATR:.2f} ATR"
+    )
+
+    print(
+        f"SMA50 slope lookback: {SMA50_SLOPE_LOOKBACK} days"
     )
 
     print()
 
     # ========================================================
-    # DOWNLOAD
+    # DOWNLOAD 5 YEARS
     # ========================================================
 
     print(
@@ -611,14 +615,15 @@ def main():
 
         return
 
-    trades = []
+    all_trades = []
 
+    rejected_trend = 0
+    rejected_candle = 0
     rejected_stop = 0
-    rejected_rr = 0
     expired = 0
 
     # ========================================================
-    # LOOP
+    # EACH TICKER
     # ========================================================
 
     for ticker in TICKERS:
@@ -630,9 +635,13 @@ def main():
                 not in
                 all_data.columns.get_level_values(0)
             ):
+
                 continue
 
-            df = all_data[ticker].copy()
+            df = (
+                all_data[ticker]
+                .copy()
+            )
 
             df.dropna(
                 inplace=True
@@ -671,61 +680,99 @@ def main():
                 .mean()
             )
 
-            df["AVG_VOL20"] = (
-                df["Volume"]
-                .rolling(20)
-                .mean()
+            df["RSI14"] = (
+                calculate_rsi(
+                    df["Close"],
+                    14
+                )
             )
 
-            df["RSI14"] = calculate_rsi(
-                df["Close"]
-            )
-
-            df["ATR14"] = calculate_atr(
-                df
+            df["ATR14"] = (
+                calculate_atr(
+                    df,
+                    ATR_PERIOD
+                )
             )
 
             # =================================================
-            # WALK FORWARD
+            # WALK THROUGH HISTORY
             # =================================================
 
-            signal_index = 210
+            signal_index = max(
+                210,
+                SMA50_SLOPE_LOOKBACK
+            )
 
-            while signal_index < len(df) - 1:
+            while (
+                signal_index
+                < len(df) - 1
+            ):
 
                 row = df.iloc[
                     signal_index
                 ]
 
-                close = float(row["Close"])
-                high = float(row["High"])
-                low = float(row["Low"])
+                open_price = float(
+                    row["Open"]
+                )
 
-                volume = float(row["Volume"])
-                avg_volume = float(row["AVG_VOL20"])
+                close = float(
+                    row["Close"]
+                )
 
-                sma200 = float(row["SMA200"])
-                sma50 = float(row["SMA50"])
-                ema20 = float(row["EMA20"])
+                high = float(
+                    row["High"]
+                )
 
-                rsi = float(row["RSI14"])
-                atr = float(row["ATR14"])
+                low = float(
+                    row["Low"]
+                )
+
+                sma200 = float(
+                    row["SMA200"]
+                )
+
+                sma50 = float(
+                    row["SMA50"]
+                )
+
+                ema20 = float(
+                    row["EMA20"]
+                )
+
+                rsi = float(
+                    row["RSI14"]
+                )
+
+                atr = float(
+                    row["ATR14"]
+                )
+
+                old_sma50 = float(
+                    df["SMA50"].iloc[
+                        signal_index
+                        - SMA50_SLOPE_LOOKBACK
+                    ]
+                )
 
                 values = [
+                    open_price,
                     close,
                     high,
                     low,
-                    volume,
-                    avg_volume,
                     sma200,
                     sma50,
                     ema20,
+                    old_sma50,
                     rsi,
                     atr
                 ]
 
                 if (
-                    any(pd.isna(x) for x in values)
+                    any(
+                        pd.isna(x)
+                        for x in values
+                    )
                     or atr <= 0
                 ):
 
@@ -733,58 +780,145 @@ def main():
                     continue
 
                 # =================================================
-                # ORIGINAL SIGNAL
+                # FILTER 1
+                # PRICE ABOVE SMA200
                 # =================================================
 
-                if close < sma200:
+                if close <= sma200:
+
+                    rejected_trend += 1
 
                     signal_index += 1
                     continue
 
+                # =================================================
+                # FILTER 2
+                # EMA20 ABOVE SMA50
+                # =================================================
+
+                if ema20 <= sma50:
+
+                    rejected_trend += 1
+
+                    signal_index += 1
+                    continue
+
+                # =================================================
+                # FILTER 3
+                # SMA50 MUST BE RISING
+                # =================================================
+
+                if sma50 <= old_sma50:
+
+                    rejected_trend += 1
+
+                    signal_index += 1
+                    continue
+
+                # =================================================
+                # FILTER 4
+                # RSI
+                # =================================================
+
                 if not (
-                    35 <= rsi <= 55
+                    RSI_MIN
+                    <= rsi
+                    <= RSI_MAX
                 ):
 
                     signal_index += 1
                     continue
 
-                touched_ema = (
-                    ema20 * 0.99
+                # =================================================
+                # FILTER 5
+                # PULLBACK TO EMA20 OR SMA50
+                # =================================================
+
+                touched_ema20 = (
+                    ema20
+                    * (1 - SUPPORT_TOLERANCE)
                     <= low
-                    <= ema20 * 1.01
+                    <=
+                    ema20
+                    * (1 + SUPPORT_TOLERANCE)
                 )
 
-                touched_sma = (
-                    sma50 * 0.99
+                touched_sma50 = (
+                    sma50
+                    * (1 - SUPPORT_TOLERANCE)
                     <= low
-                    <= sma50 * 1.01
+                    <=
+                    sma50
+                    * (1 + SUPPORT_TOLERANCE)
                 )
 
-                closed_above = (
+                if not (
+                    touched_ema20
+                    or touched_sma50
+                ):
+
+                    signal_index += 1
+                    continue
+
+                # =================================================
+                # FILTER 6
+                # CLOSE ABOVE SUPPORT
+                # =================================================
+
+                if not (
                     close >= ema20
-                    or
-                    close >= sma50
-                )
-
-                if not (
-                    (
-                        touched_ema
-                        or touched_sma
-                    )
-                    and
-                    closed_above
+                    or close >= sma50
                 ):
 
                     signal_index += 1
                     continue
 
                 # =================================================
-                # ENTRY
+                # FILTER 7
+                # GREEN CANDLE
+                # =================================================
+
+                if close <= open_price:
+
+                    rejected_candle += 1
+
+                    signal_index += 1
+                    continue
+
+                # =================================================
+                # FILTER 8
+                # CLOSE IN UPPER HALF OF DAILY RANGE
+                # =================================================
+
+                candle_range = (
+                    high - low
+                )
+
+                if candle_range <= 0:
+
+                    signal_index += 1
+                    continue
+
+                midpoint = (
+                    low
+                    + candle_range * 0.50
+                )
+
+                if close <= midpoint:
+
+                    rejected_candle += 1
+
+                    signal_index += 1
+                    continue
+
+                # =================================================
+                # ATR-BASED ENTRY
                 # =================================================
 
                 entry = (
                     high
-                    + ENTRY_BUFFER
+                    + ENTRY_ATR_BUFFER
+                    * atr
                 )
 
                 # =================================================
@@ -810,16 +944,22 @@ def main():
                 sl = (
                     swing_low
                     -
-                    ATR_SL_BUFFER
+                    SL_ATR_BUFFER
                     * atr
                 )
 
-                risk = entry - sl
+                risk = (
+                    entry - sl
+                )
 
                 if risk <= 0:
 
                     signal_index += 1
                     continue
+
+                # =================================================
+                # MINIMUM STOP DISTANCE
+                # =================================================
 
                 if risk < (
                     MIN_STOP_ATR
@@ -832,44 +972,15 @@ def main():
                     continue
 
                 # =================================================
-                # SWING HIGH FILTER
+                # ENTRY MUST TRIGGER WITHIN 3 DAYS
                 # =================================================
 
-                swing_high = (
-                    find_previous_swing_high(
+                entry_index = (
+                    find_entry(
                         df,
-                        signal_index
+                        signal_index,
+                        entry
                     )
-                )
-
-                if (
-                    swing_high is None
-                    or
-                    swing_high <= entry
-                ):
-
-                    signal_index += 1
-                    continue
-
-                swing_rr = (
-                    swing_high - entry
-                ) / risk
-
-                if swing_rr < MIN_SWING_RR:
-
-                    rejected_rr += 1
-
-                    signal_index += 1
-                    continue
-
-                # =================================================
-                # ENTRY ACTIVATION
-                # =================================================
-
-                entry_index = find_entry(
-                    df,
-                    signal_index,
-                    entry
                 )
 
                 if entry_index is None:
@@ -884,11 +995,22 @@ def main():
                     continue
 
                 # =================================================
-                # A — FIXED 2R
+                # FIXED 2R
                 # =================================================
 
-                fixed_r, fixed_exit, fixed_result = (
-                    simulate_fixed_2r(
+                fixed = simulate_fixed_2r(
+                    df,
+                    entry_index,
+                    entry,
+                    sl
+                )
+
+                # =================================================
+                # PARTIAL 2R / 4R BE
+                # =================================================
+
+                partial = (
+                    simulate_partial_2r_4r_be(
                         df,
                         entry_index,
                         entry,
@@ -896,62 +1018,19 @@ def main():
                     )
                 )
 
-                # =================================================
-                # B — 2R / 4R ORIGINAL SL
-                # =================================================
-
-                p4sl_r, p4sl_exit, p4sl_result, p4sl_hit = (
-                    simulate_partial(
-                        df,
-                        entry_index,
-                        entry,
-                        sl,
-                        runner_r=4.0,
-                        breakeven_after_tp1=False
-                    )
-                )
-
-                # =================================================
-                # C — 2R / 4R BREAKEVEN
-                # =================================================
-
-                p4be_r, p4be_exit, p4be_result, p4be_hit = (
-                    simulate_partial(
-                        df,
-                        entry_index,
-                        entry,
-                        sl,
-                        runner_r=4.0,
-                        breakeven_after_tp1=True
-                    )
-                )
-
-                # =================================================
-                # D — 2R / 5R BREAKEVEN
-                # =================================================
-
-                p5be_r, p5be_exit, p5be_result, p5be_hit = (
-                    simulate_partial(
-                        df,
-                        entry_index,
-                        entry,
-                        sl,
-                        runner_r=5.0,
-                        breakeven_after_tp1=True
-                    )
-                )
-
                 signal_date = pd.Timestamp(
-                    df.index[signal_index]
+                    df.index[
+                        signal_index
+                    ]
                 )
 
-                period = (
-                    "OUT_OF_SAMPLE"
-                    if signal_date >= TEST_START
-                    else "DEVELOPMENT"
+                entry_date = pd.Timestamp(
+                    df.index[
+                        entry_index
+                    ]
                 )
 
-                trades.append(
+                all_trades.append(
                     {
                         "Ticker":
                             ticker,
@@ -960,12 +1039,10 @@ def main():
                             signal_date,
 
                         "Entry_Date":
-                            df.index[
-                                entry_index
-                            ],
+                            entry_date,
 
-                        "Period":
-                            period,
+                        "Year":
+                            signal_date.year,
 
                         "Entry":
                             entry,
@@ -976,46 +1053,49 @@ def main():
                         "ATR":
                             atr,
 
-                        "Swing_RR":
-                            swing_rr,
+                        "Risk_ATR":
+                            risk / atr,
+
+                        "RSI":
+                            rsi,
+
+                        "EMA20":
+                            ema20,
+
+                        "SMA50":
+                            sma50,
 
                         "Fixed2_R":
-                            fixed_r,
+                            fixed["R"],
 
                         "Fixed2_Result":
-                            fixed_result,
+                            fixed["Result"],
 
-                        "Partial4_SL_R":
-                            p4sl_r,
+                        "Partial_R":
+                            partial["R"],
 
-                        "Partial4_SL_Result":
-                            p4sl_result,
+                        "Partial_Result":
+                            partial["Result"],
 
-                        "Partial4_BE_R":
-                            p4be_r,
+                        "Partial_Hit_2R":
+                            partial["Hit_2R"],
 
-                        "Partial4_BE_Result":
-                            p4be_result,
-
-                        "Partial5_BE_R":
-                            p5be_r,
-
-                        "Partial5_BE_Result":
-                            p5be_result
+                        "Partial_Hit_4R":
+                            partial["Hit_4R"]
                     }
                 )
 
                 # =================================================
-                # NO OVERLAPPING TRADE
-                #
-                # Advance beyond longest strategy exit.
+                # NO OVERLAPPING TRADE PER TICKER
                 # =================================================
 
                 last_exit = max(
-                    fixed_exit,
-                    p4sl_exit,
-                    p4be_exit,
-                    p5be_exit
+                    fixed[
+                        "Exit_Index"
+                    ],
+                    partial[
+                        "Exit_Index"
+                    ]
                 )
 
                 signal_index = (
@@ -1029,157 +1109,282 @@ def main():
                 f"{type(e).__name__}: {e}"
             )
 
+            continue
+
     # ========================================================
-    # RESULTS
+    # NO RESULTS
     # ========================================================
 
-    if not trades:
+    if not all_trades:
 
+        print()
         print(
             "NO TRADES FOUND."
         )
 
         return
 
+    # ========================================================
+    # DATAFRAME
+    # ========================================================
+
     trades = pd.DataFrame(
-        trades
+        all_trades
     )
 
-    trades = trades.sort_values(
-        [
-            "Signal_Date",
-            "Ticker"
+    trades = (
+        trades
+        .sort_values(
+            [
+                "Signal_Date",
+                "Ticker"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    # ========================================================
+    # ALL PERIOD
+    # ========================================================
+
+    overall = (
+        build_comparison(
+            trades
+        )
+    )
+
+    print()
+
+    print("=" * 100)
+    print("V6 - ALL DATA")
+    print("=" * 100)
+
+    print(
+        overall.round(3)
+        .to_string()
+    )
+
+    # ========================================================
+    # WALK-FORWARD / YEAR BY YEAR
+    # ========================================================
+
+    years = sorted(
+        trades[
+            "Year"
+        ].unique()
+    )
+
+    print()
+
+    print("=" * 100)
+    print("V6 - YEAR-BY-YEAR WALK-FORWARD CHECK")
+    print("=" * 100)
+
+    yearly_results = []
+
+    for year in years:
+
+        year_trades = trades[
+            trades["Year"]
+            == year
+        ].copy()
+
+        comparison = (
+            build_comparison(
+                year_trades
+            )
+        )
+
+        for strategy in (
+            comparison.index
+        ):
+
+            row = comparison.loc[
+                strategy
+            ]
+
+            yearly_results.append(
+                {
+                    "Year":
+                        year,
+
+                    "Strategy":
+                        strategy,
+
+                    "Trades":
+                        row["Trades"],
+
+                    "Profitable_%":
+                        row[
+                            "Profitable_%"
+                        ],
+
+                    "Total_R":
+                        row[
+                            "Total_R"
+                        ],
+
+                    "Avg_R":
+                        row[
+                            "Avg_R"
+                        ],
+
+                    "Profit_Factor":
+                        row[
+                            "Profit_Factor"
+                        ],
+
+                    "Max_DD_R":
+                        row[
+                            "Max_Drawdown_R"
+                        ]
+                }
+            )
+
+    yearly_df = pd.DataFrame(
+        yearly_results
+    )
+
+    print(
+        yearly_df.round(3)
+        .to_string(
+            index=False
+        )
+    )
+
+    # ========================================================
+    # YEAR CONSISTENCY
+    # ========================================================
+
+    print()
+
+    print("=" * 100)
+    print("V6 - CONSISTENCY CHECK")
+    print("=" * 100)
+
+    for strategy in [
+        "Fixed 2R",
+        "50% 2R + 50% 4R / BE"
+    ]:
+
+        subset = yearly_df[
+            yearly_df[
+                "Strategy"
+            ]
+            == strategy
         ]
-    ).reset_index(
-        drop=True
-    )
+
+        positive_years = (
+            subset[
+                "Total_R"
+            ] > 0
+        ).sum()
+
+        negative_years = (
+            subset[
+                "Total_R"
+            ] < 0
+        ).sum()
+
+        avg_yearly_r = (
+            subset[
+                "Avg_R"
+            ].mean()
+        )
+
+        print()
+        print(strategy)
+
+        print(
+            f"Positive years:       "
+            f"{positive_years}/{len(subset)}"
+        )
+
+        print(
+            f"Negative years:       "
+            f"{negative_years}/{len(subset)}"
+        )
+
+        print(
+            f"Average yearly Avg R: "
+            f"{avg_yearly_r:.3f}R"
+        )
 
     # ========================================================
-    # ALL DATA
+    # RECENT PERIOD
     # ========================================================
 
-    all_results = build_comparison(
-        trades
-    )
-
-    # ========================================================
-    # DEVELOPMENT
-    # ========================================================
-
-    development = trades[
-        trades["Period"]
-        == "DEVELOPMENT"
+    recent = trades[
+        trades[
+            "Signal_Date"
+        ]
+        >= pd.Timestamp(
+            "2025-01-01"
+        )
     ].copy()
 
-    dev_results = build_comparison(
-        development
-    )
-
-    # ========================================================
-    # OUT OF SAMPLE
-    # ========================================================
-
-    out_sample = trades[
-        trades["Period"]
-        == "OUT_OF_SAMPLE"
-    ].copy()
-
-    oos_results = build_comparison(
-        out_sample
-    )
-
-    # ========================================================
-    # PRINT
-    # ========================================================
-
     print()
-    print("=" * 100)
-    print("V5 — ALL DATA")
-    print("=" * 100)
 
-    print(
-        all_results.round(3)
-        .to_string()
-    )
-
-    print()
     print("=" * 100)
-    print("V5 — DEVELOPMENT PERIOD")
+    print("V6 - 2025+ CHECK")
     print("=" * 100)
 
-    print(
-        dev_results.round(3)
-        .to_string()
-    )
+    if not recent.empty:
 
-    print()
-    print("=" * 100)
-    print(
-        f"V5 — OUT OF SAMPLE ({TEST_START.date()}+)"
-    )
-    print("=" * 100)
-
-    print(
-        oos_results.round(3)
-        .to_string()
-    )
-
-    # ========================================================
-    # WINNERS
-    # ========================================================
-
-    print()
-    print("=" * 100)
-    print("OUT-OF-SAMPLE LEADERS")
-    print("=" * 100)
-
-    if not oos_results.empty:
-
-        print(
-            "Best Average R:",
-            oos_results["Avg_R"].idxmax()
+        recent_results = (
+            build_comparison(
+                recent
+            )
         )
 
         print(
-            "Best Profit Factor:",
-            oos_results[
-                "Profit_Factor"
-            ].idxmax()
+            recent_results
+            .round(3)
+            .to_string()
         )
 
-        print(
-            "Lowest Drawdown:",
-            oos_results[
-                "Max_Drawdown_R"
-            ].idxmax()
-        )
+    # ========================================================
+    # SIGNAL COUNTS
+    # ========================================================
+
+    print()
+
+    print("=" * 100)
+    print("FILTER DIAGNOSTICS")
+    print("=" * 100)
+
+    print(
+        f"Final trades:                 {len(trades)}"
+    )
+
+    print(
+        f"Rejected by trend filters:    {rejected_trend}"
+    )
+
+    print(
+        f"Rejected by candle filters:   {rejected_candle}"
+    )
+
+    print(
+        f"Rejected small stops:         {rejected_stop}"
+    )
+
+    print(
+        f"Expired setups:               {expired}"
+    )
 
     print()
 
     print(
-        f"Total trades:          {len(trades)}"
+        f"Partial trades reaching 2R:   "
+        f"{trades['Partial_Hit_2R'].sum()}"
     )
 
     print(
-        f"Development trades:    {len(development)}"
-    )
-
-    print(
-        f"Out-of-sample trades:  {len(out_sample)}"
-    )
-
-    print()
-
-    print(
-        f"Rejected small stops:  {rejected_stop}"
-    )
-
-    print(
-        f"Rejected low R:R:      {rejected_rr}"
-    )
-
-    print(
-        f"Expired setups:        {expired}"
+        f"Partial trades reaching 4R:   "
+        f"{trades['Partial_Hit_4R'].sum()}"
     )
 
     # ========================================================
@@ -1187,20 +1392,17 @@ def main():
     # ========================================================
 
     trades.to_csv(
-        "backtest_v5_trades.csv",
+        "backtest_v6_trades.csv",
         index=False
     )
 
-    all_results.to_csv(
-        "backtest_v5_all.csv"
+    overall.to_csv(
+        "backtest_v6_overall.csv"
     )
 
-    dev_results.to_csv(
-        "backtest_v5_development.csv"
-    )
-
-    oos_results.to_csv(
-        "backtest_v5_out_of_sample.csv"
+    yearly_df.to_csv(
+        "backtest_v6_yearly.csv",
+        index=False
     )
 
     print()
@@ -1212,25 +1414,21 @@ def main():
     )
 
     print(
-        "  backtest_v5_trades.csv"
+        "  backtest_v6_trades.csv"
     )
 
     print(
-        "  backtest_v5_all.csv"
+        "  backtest_v6_overall.csv"
     )
 
     print(
-        "  backtest_v5_development.csv"
-    )
-
-    print(
-        "  backtest_v5_out_of_sample.csv"
+        "  backtest_v6_yearly.csv"
     )
 
     print()
 
     print(
-        "Pullback V5 completed."
+        "Pullback V6 completed."
     )
 
 
