@@ -24,36 +24,55 @@ TICKERS = [
 
 
 # ============================================================
-# STRATEGY PARAMETERS - V6
+# ACCOUNT SETTINGS
+# ============================================================
+
+STARTING_CAPITAL = 1000.0
+
+# 0.5% account risk per trade
+RISK_PER_TRADE = 0.005
+
+# Maximum simultaneous positions
+MAX_OPEN_POSITIONS = 5
+
+# Fractional shares supported
+MIN_SHARE_SIZE = 0.0001
+
+
+# ============================================================
+# REALISTIC EXECUTION COSTS
+# ============================================================
+
+# 0.05% worse execution each side
+SLIPPAGE_PCT = 0.0005
+
+# 0.02% transaction cost each side
+COMMISSION_PCT = 0.0002
+
+
+# ============================================================
+# V6 STRATEGY
 # ============================================================
 
 SWING_LOOKBACK = 3
 
 ATR_PERIOD = 14
 
-# Entry = signal High + 10% ATR
 ENTRY_ATR_BUFFER = 0.10
 
-# SL = Swing Low - 10% ATR
 SL_ATR_BUFFER = 0.10
 
-# Entry -> SL must be at least 0.50 ATR
 MIN_STOP_ATR = 0.50
 
-# Signal remains valid for 3 sessions
 ENTRY_VALID_DAYS = 3
 
-# Trade can remain open for 10 sessions
 MAX_HOLDING_DAYS = 10
 
-# Trend slope
 SMA50_SLOPE_LOOKBACK = 10
 
-# RSI
 RSI_MIN = 35
 RSI_MAX = 55
 
-# Pullback proximity
 SUPPORT_TOLERANCE = 0.01
 
 
@@ -114,10 +133,13 @@ def calculate_atr(df, period=14):
 
 
 # ============================================================
-# PREVIOUS CONFIRMED SWING LOW
+# SWING LOW
 # ============================================================
 
-def find_previous_swing_low(df, signal_index):
+def find_previous_swing_low(
+    df,
+    signal_index
+):
 
     latest_candidate = (
         signal_index
@@ -143,7 +165,8 @@ def find_previous_swing_low(df, signal_index):
         ]
 
         right = df["Low"].iloc[
-            i + 1:i + SWING_LOOKBACK + 1
+            i + 1:
+            i + SWING_LOOKBACK + 1
         ]
 
         if (
@@ -176,18 +199,18 @@ def find_entry(
         last_index + 1
     ):
 
-        day_high = float(
+        high = float(
             df["High"].iloc[i]
         )
 
-        if day_high >= entry:
+        if high >= entry:
             return i
 
     return None
 
 
 # ============================================================
-# FIXED 2R
+# FIXED 2R TRADE SIMULATION
 # ============================================================
 
 def simulate_fixed_2r(
@@ -224,407 +247,131 @@ def simulate_fixed_2r(
             df["Low"].iloc[i]
         )
 
-        # Daily ambiguity:
-        # if SL and TP both touched -> assume SL first
+        # Conservative:
+        # SL and TP same daily candle -> SL first
+
         if low <= sl:
+
             return {
-                "R": -1.0,
                 "Exit_Index": i,
+                "Exit_Price": sl,
                 "Result": "SL"
             }
 
         if high >= target:
+
             return {
-                "R": 2.0,
                 "Exit_Index": i,
+                "Exit_Price": target,
                 "Result": "TP"
             }
 
     exit_price = float(
-        df["Close"].iloc[last_index]
+        df["Close"].iloc[
+            last_index
+        ]
     )
 
-    r = (
-        exit_price - entry
-    ) / risk
-
     return {
-        "R": r,
         "Exit_Index": last_index,
+        "Exit_Price": exit_price,
         "Result": "TIME"
     }
 
 
 # ============================================================
-# 50% @ 2R
-# 50% @ 4R
-# MOVE SECOND HALF TO BREAKEVEN AFTER TP1
+# GET QQQ MARKET REGIME
 # ============================================================
 
-def simulate_partial_2r_4r_be(
-    df,
-    entry_index,
-    entry,
-    sl
-):
+def get_qqq_regime_data():
 
-    risk = entry - sl
-
-    tp1 = (
-        entry
-        + 2.0 * risk
+    print(
+        "Downloading QQQ market-regime data..."
     )
 
-    tp2 = (
-        entry
-        + 4.0 * risk
+    qqq = yf.download(
+        "QQQ",
+        period="5y",
+        interval="1d",
+        progress=False,
+        auto_adjust=True,
+        repair=True
     )
 
-    last_index = min(
-        entry_index
-        + MAX_HOLDING_DAYS
-        - 1,
-        len(df) - 1
-    )
+    if qqq.empty:
+        raise RuntimeError(
+            "QQQ download failed."
+        )
 
-    tp1_hit = False
-
-    for i in range(
-        entry_index,
-        last_index + 1
+    # Handle possible MultiIndex
+    if isinstance(
+        qqq.columns,
+        pd.MultiIndex
     ):
 
-        high = float(
-            df["High"].iloc[i]
+        qqq.columns = (
+            qqq.columns
+            .get_level_values(0)
         )
 
-        low = float(
-            df["Low"].iloc[i]
-        )
-
-        # ====================================================
-        # BEFORE TP1
-        # ====================================================
-
-        if not tp1_hit:
-
-            # Conservative daily assumption
-            if low <= sl:
-
-                return {
-                    "R": -1.0,
-                    "Exit_Index": i,
-                    "Result": "SL_BEFORE_TP1",
-                    "Hit_2R": False,
-                    "Hit_4R": False
-                }
-
-            if high >= tp1:
-
-                tp1_hit = True
-
-                # Same candle reaches 4R too
-                if high >= tp2:
-
-                    # 50% × 2R = +1R
-                    # 50% × 4R = +2R
-                    # Total = +3R
-
-                    return {
-                        "R": 3.0,
-                        "Exit_Index": i,
-                        "Result": "FULL_TARGET",
-                        "Hit_2R": True,
-                        "Hit_4R": True
-                    }
-
-                continue
-
-        # ====================================================
-        # AFTER TP1
-        # ====================================================
-
-        else:
-
-            # Remaining 50% now has stop at Entry
-
-            # Conservative:
-            # if BE and TP2 occur in same candle -> BE first
-            if low <= entry:
-
-                # First half already banked +1R
-                # Second half exits 0R
-                # Total = +1R
-
-                return {
-                    "R": 1.0,
-                    "Exit_Index": i,
-                    "Result": "TP1_THEN_BE",
-                    "Hit_2R": True,
-                    "Hit_4R": False
-                }
-
-            if high >= tp2:
-
-                return {
-                    "R": 3.0,
-                    "Exit_Index": i,
-                    "Result": "FULL_TARGET",
-                    "Hit_2R": True,
-                    "Hit_4R": True
-                }
-
-    # ========================================================
-    # TIME EXIT
-    # ========================================================
-
-    exit_price = float(
-        df["Close"].iloc[last_index]
+    qqq["SMA200"] = (
+        qqq["Close"]
+        .rolling(200)
+        .mean()
     )
 
-    current_r = (
-        exit_price - entry
-    ) / risk
-
-    if not tp1_hit:
-
-        return {
-            "R": current_r,
-            "Exit_Index": last_index,
-            "Result": "TIME_BEFORE_TP1",
-            "Hit_2R": False,
-            "Hit_4R": False
-        }
-
-    # Half already sold at +2R:
-    #
-    # 0.5 × 2R = +1R
-    #
-    # remaining 50%:
-    # 0.5 × current R
-
-    total_r = (
-        1.0
-        + 0.5 * current_r
+    qqq["Regime"] = np.where(
+        qqq["Close"]
+        >
+        qqq["SMA200"],
+        "BULL",
+        "BEAR"
     )
 
-    return {
-        "R": total_r,
-        "Exit_Index": last_index,
-        "Result": "TP1_THEN_TIME",
-        "Hit_2R": True,
-        "Hit_4R": False
-    }
+    return qqq
 
 
 # ============================================================
-# PERFORMANCE STATS
+# MARKET REGIME FOR DATE
 # ============================================================
 
-def calculate_stats(
-    df,
-    r_column
+def get_regime_for_date(
+    qqq,
+    date
 ):
 
-    if df.empty:
-
-        return {
-            "Trades": 0,
-            "Profitable_%": 0,
-            "Total_R": 0,
-            "Avg_R": 0,
-            "Median_R": 0,
-            "Profit_Factor": 0,
-            "Max_Drawdown_R": 0,
-            "Max_Consecutive_Losses": 0
-        }
-
-    r = df[r_column]
-
-    positive = r[
-        r > 0
+    available = qqq[
+        qqq.index <= date
     ]
 
-    negative = r[
-        r < 0
-    ]
+    if available.empty:
+        return "UNKNOWN"
 
-    gross_profit = (
-        positive.sum()
-    )
+    latest = available.iloc[-1]
 
-    gross_loss = abs(
-        negative.sum()
-    )
+    if pd.isna(
+        latest["SMA200"]
+    ):
+        return "UNKNOWN"
 
-    profit_factor = (
-        gross_profit / gross_loss
-        if gross_loss > 0
-        else np.inf
-    )
-
-    cumulative = (
-        r.cumsum()
-    )
-
-    peak = (
-        cumulative
-        .clip(lower=0)
-        .cummax()
-    )
-
-    drawdown = (
-        cumulative - peak
-    )
-
-    max_drawdown = (
-        drawdown.min()
-    )
-
-    max_consecutive_losses = 0
-    current_losses = 0
-
-    for value in r:
-
-        if value < 0:
-
-            current_losses += 1
-
-            max_consecutive_losses = max(
-                max_consecutive_losses,
-                current_losses
-            )
-
-        else:
-
-            current_losses = 0
-
-    return {
-        "Trades":
-            len(df),
-
-        "Profitable_%":
-            (r > 0).mean() * 100,
-
-        "Total_R":
-            r.sum(),
-
-        "Avg_R":
-            r.mean(),
-
-        "Median_R":
-            r.median(),
-
-        "Profit_Factor":
-            profit_factor,
-
-        "Max_Drawdown_R":
-            max_drawdown,
-
-        "Max_Consecutive_Losses":
-            max_consecutive_losses
-    }
+    return latest["Regime"]
 
 
 # ============================================================
-# BUILD STRATEGY COMPARISON
+# GENERATE ALL V6 TRADE CANDIDATES
 # ============================================================
 
-def build_comparison(
-    trades
+def generate_candidates(
+    all_data,
+    qqq
 ):
 
-    return pd.DataFrame(
-        {
-            "Fixed 2R":
-                calculate_stats(
-                    trades,
-                    "Fixed2_R"
-                ),
-
-            "50% 2R + 50% 4R / BE":
-                calculate_stats(
-                    trades,
-                    "Partial_R"
-                )
-        }
-    ).T
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print("=" * 100)
-
-    print(
-        "PULLBACK BACKTEST V6 - TREND QUALITY + ATR ENTRY + WALK-FORWARD"
-    )
-
-    print("=" * 100)
-
-    print()
-
-    print(
-        f"Entry: High + {ENTRY_ATR_BUFFER:.2f} ATR"
-    )
-
-    print(
-        f"SL: Swing Low - {SL_ATR_BUFFER:.2f} ATR"
-    )
-
-    print(
-        f"Minimum stop distance: {MIN_STOP_ATR:.2f} ATR"
-    )
-
-    print(
-        f"SMA50 slope lookback: {SMA50_SLOPE_LOOKBACK} days"
-    )
-
-    print()
-
-    # ========================================================
-    # DOWNLOAD 5 YEARS
-    # ========================================================
-
-    print(
-        f"Downloading {len(TICKERS)} tickers..."
-    )
-
-    try:
-
-        all_data = yf.download(
-            TICKERS,
-            period="5y",
-            interval="1d",
-            group_by="ticker",
-            progress=False,
-            auto_adjust=True,
-            repair=True,
-            threads=True
-        )
-
-    except Exception as e:
-
-        print(
-            f"DOWNLOAD ERROR: "
-            f"{type(e).__name__}: {e}"
-        )
-
-        return
-
-    all_trades = []
+    candidates = []
 
     rejected_trend = 0
     rejected_candle = 0
     rejected_stop = 0
     expired = 0
-
-    # ========================================================
-    # EACH TICKER
-    # ========================================================
 
     for ticker in TICKERS:
 
@@ -635,7 +382,6 @@ def main():
                 not in
                 all_data.columns.get_level_values(0)
             ):
-
                 continue
 
             df = (
@@ -695,18 +441,12 @@ def main():
             )
 
             # =================================================
-            # WALK THROUGH HISTORY
+            # WALK FORWARD
             # =================================================
 
-            signal_index = max(
-                210,
-                SMA50_SLOPE_LOOKBACK
-            )
+            signal_index = 210
 
-            while (
-                signal_index
-                < len(df) - 1
-            ):
+            while signal_index < len(df) - 1:
 
                 row = df.iloc[
                     signal_index
@@ -780,8 +520,7 @@ def main():
                     continue
 
                 # =================================================
-                # FILTER 1
-                # PRICE ABOVE SMA200
+                # TREND FILTERS
                 # =================================================
 
                 if close <= sma200:
@@ -791,22 +530,12 @@ def main():
                     signal_index += 1
                     continue
 
-                # =================================================
-                # FILTER 2
-                # EMA20 ABOVE SMA50
-                # =================================================
-
                 if ema20 <= sma50:
 
                     rejected_trend += 1
 
                     signal_index += 1
                     continue
-
-                # =================================================
-                # FILTER 3
-                # SMA50 MUST BE RISING
-                # =================================================
 
                 if sma50 <= old_sma50:
 
@@ -816,7 +545,6 @@ def main():
                     continue
 
                 # =================================================
-                # FILTER 4
                 # RSI
                 # =================================================
 
@@ -830,8 +558,7 @@ def main():
                     continue
 
                 # =================================================
-                # FILTER 5
-                # PULLBACK TO EMA20 OR SMA50
+                # PULLBACK
                 # =================================================
 
                 touched_ema20 = (
@@ -861,7 +588,6 @@ def main():
                     continue
 
                 # =================================================
-                # FILTER 6
                 # CLOSE ABOVE SUPPORT
                 # =================================================
 
@@ -874,8 +600,7 @@ def main():
                     continue
 
                 # =================================================
-                # FILTER 7
-                # GREEN CANDLE
+                # BULLISH CANDLE
                 # =================================================
 
                 if close <= open_price:
@@ -884,11 +609,6 @@ def main():
 
                     signal_index += 1
                     continue
-
-                # =================================================
-                # FILTER 8
-                # CLOSE IN UPPER HALF OF DAILY RANGE
-                # =================================================
 
                 candle_range = (
                     high - low
@@ -901,7 +621,7 @@ def main():
 
                 midpoint = (
                     low
-                    + candle_range * 0.50
+                    + 0.5 * candle_range
                 )
 
                 if close <= midpoint:
@@ -912,12 +632,13 @@ def main():
                     continue
 
                 # =================================================
-                # ATR-BASED ENTRY
+                # ATR ENTRY
                 # =================================================
 
                 entry = (
                     high
-                    + ENTRY_ATR_BUFFER
+                    +
+                    ENTRY_ATR_BUFFER
                     * atr
                 )
 
@@ -938,7 +659,7 @@ def main():
                     continue
 
                 # =================================================
-                # ATR STOP
+                # STOP
                 # =================================================
 
                 sl = (
@@ -948,20 +669,16 @@ def main():
                     * atr
                 )
 
-                risk = (
+                technical_risk = (
                     entry - sl
                 )
 
-                if risk <= 0:
+                if technical_risk <= 0:
 
                     signal_index += 1
                     continue
 
-                # =================================================
-                # MINIMUM STOP DISTANCE
-                # =================================================
-
-                if risk < (
+                if technical_risk < (
                     MIN_STOP_ATR
                     * atr
                 ):
@@ -972,7 +689,7 @@ def main():
                     continue
 
                 # =================================================
-                # ENTRY MUST TRIGGER WITHIN 3 DAYS
+                # ACTUAL ENTRY
                 # =================================================
 
                 entry_index = (
@@ -995,22 +712,11 @@ def main():
                     continue
 
                 # =================================================
-                # FIXED 2R
+                # SIMULATE FIXED 2R
                 # =================================================
 
-                fixed = simulate_fixed_2r(
-                    df,
-                    entry_index,
-                    entry,
-                    sl
-                )
-
-                # =================================================
-                # PARTIAL 2R / 4R BE
-                # =================================================
-
-                partial = (
-                    simulate_partial_2r_4r_be(
+                result = (
+                    simulate_fixed_2r(
                         df,
                         entry_index,
                         entry,
@@ -1030,7 +736,20 @@ def main():
                     ]
                 )
 
-                all_trades.append(
+                exit_date = pd.Timestamp(
+                    df.index[
+                        result["Exit_Index"]
+                    ]
+                )
+
+                regime = (
+                    get_regime_for_date(
+                        qqq,
+                        signal_date
+                    )
+                )
+
+                candidates.append(
                     {
                         "Ticker":
                             ticker,
@@ -1041,65 +760,44 @@ def main():
                         "Entry_Date":
                             entry_date,
 
-                        "Year":
-                            signal_date.year,
+                        "Exit_Date":
+                            exit_date,
 
-                        "Entry":
+                        "Raw_Entry":
                             entry,
 
-                        "SL":
+                        "Raw_SL":
                             sl,
+
+                        "Raw_Exit":
+                            result[
+                                "Exit_Price"
+                            ],
+
+                        "Result":
+                            result[
+                                "Result"
+                            ],
 
                         "ATR":
                             atr,
 
-                        "Risk_ATR":
-                            risk / atr,
-
                         "RSI":
                             rsi,
 
-                        "EMA20":
-                            ema20,
-
-                        "SMA50":
-                            sma50,
-
-                        "Fixed2_R":
-                            fixed["R"],
-
-                        "Fixed2_Result":
-                            fixed["Result"],
-
-                        "Partial_R":
-                            partial["R"],
-
-                        "Partial_Result":
-                            partial["Result"],
-
-                        "Partial_Hit_2R":
-                            partial["Hit_2R"],
-
-                        "Partial_Hit_4R":
-                            partial["Hit_4R"]
+                        "Regime":
+                            regime
                     }
                 )
 
-                # =================================================
-                # NO OVERLAPPING TRADE PER TICKER
-                # =================================================
-
-                last_exit = max(
-                    fixed[
-                        "Exit_Index"
-                    ],
-                    partial[
-                        "Exit_Index"
-                    ]
-                )
+                # No overlapping candidate trades
+                # for the same ticker
 
                 signal_index = (
-                    last_exit + 1
+                    result[
+                        "Exit_Index"
+                    ]
+                    + 1
                 )
 
         except Exception as e:
@@ -1109,34 +807,41 @@ def main():
                 f"{type(e).__name__}: {e}"
             )
 
-            continue
+    diagnostics = {
+        "Rejected_Trend":
+            rejected_trend,
 
-    # ========================================================
-    # NO RESULTS
-    # ========================================================
+        "Rejected_Candle":
+            rejected_candle,
 
-    if not all_trades:
+        "Rejected_Stop":
+            rejected_stop,
 
-        print()
-        print(
-            "NO TRADES FOUND."
-        )
+        "Expired":
+            expired
+    }
 
-        return
-
-    # ========================================================
-    # DATAFRAME
-    # ========================================================
-
-    trades = pd.DataFrame(
-        all_trades
+    return (
+        pd.DataFrame(
+            candidates
+        ),
+        diagnostics
     )
 
-    trades = (
-        trades
+
+# ============================================================
+# PORTFOLIO SIMULATION
+# ============================================================
+
+def simulate_portfolio(
+    candidates
+):
+
+    candidates = (
+        candidates
         .sort_values(
             [
-                "Signal_Date",
+                "Entry_Date",
                 "Ticker"
             ]
         )
@@ -1145,290 +850,989 @@ def main():
         )
     )
 
+    cash = STARTING_CAPITAL
+
+    # Realized account equity
+    realized_equity = STARTING_CAPITAL
+
+    open_positions = []
+
+    completed = []
+
+    skipped_slots = 0
+    skipped_cash = 0
+
     # ========================================================
-    # ALL PERIOD
+    # CLOSE POSITIONS BEFORE NEW ENTRY DATE
     # ========================================================
 
-    overall = (
-        build_comparison(
-            trades
+    def close_old_positions(
+        current_date
+    ):
+
+        nonlocal cash
+        nonlocal realized_equity
+        nonlocal open_positions
+        nonlocal completed
+
+        still_open = []
+
+        # Conservative:
+        # position exiting ON current entry date
+        # is considered still open.
+        #
+        # We only free capital if Exit_Date < current_date.
+
+        closing = [
+            p
+            for p in open_positions
+            if p["Exit_Date"] < current_date
+        ]
+
+        still_open = [
+            p
+            for p in open_positions
+            if p["Exit_Date"] >= current_date
+        ]
+
+        closing = sorted(
+            closing,
+            key=lambda x: x[
+                "Exit_Date"
+            ]
+        )
+
+        for position in closing:
+
+            cash += position[
+                "Net_Exit_Proceeds"
+            ]
+
+            realized_equity += position[
+                "Net_PnL"
+            ]
+
+            position[
+                "Account_After"
+            ] = realized_equity
+
+            completed.append(
+                position
+            )
+
+        open_positions = (
+            still_open
+        )
+
+    # ========================================================
+    # PROCESS CANDIDATES
+    # ========================================================
+
+    for _, trade in candidates.iterrows():
+
+        entry_date = trade[
+            "Entry_Date"
+        ]
+
+        close_old_positions(
+            entry_date
+        )
+
+        # ====================================================
+        # MAX POSITIONS
+        # ====================================================
+
+        if (
+            len(open_positions)
+            >= MAX_OPEN_POSITIONS
+        ):
+
+            skipped_slots += 1
+            continue
+
+        raw_entry = float(
+            trade["Raw_Entry"]
+        )
+
+        raw_sl = float(
+            trade["Raw_SL"]
+        )
+
+        raw_exit = float(
+            trade["Raw_Exit"]
+        )
+
+        # ====================================================
+        # SLIPPAGE
+        # ====================================================
+
+        # Buy slightly more expensive
+        entry_fill = (
+            raw_entry
+            * (1 + SLIPPAGE_PCT)
+        )
+
+        # Stop execution slightly worse
+        stop_fill = (
+            raw_sl
+            * (1 - SLIPPAGE_PCT)
+        )
+
+        # Sell slightly lower
+        exit_fill = (
+            raw_exit
+            * (1 - SLIPPAGE_PCT)
+        )
+
+        # ====================================================
+        # RISK PER SHARE
+        # ====================================================
+
+        risk_per_share = (
+            entry_fill
+            - stop_fill
+        )
+
+        if risk_per_share <= 0:
+            continue
+
+        # ====================================================
+        # ACCOUNT RISK
+        # ====================================================
+
+        risk_budget = (
+            realized_equity
+            * RISK_PER_TRADE
+        )
+
+        shares_by_risk = (
+            risk_budget
+            / risk_per_share
+        )
+
+        # ====================================================
+        # AVAILABLE CASH LIMIT
+        # ====================================================
+
+        # Need enough cash for entry
+        # plus entry commission.
+
+        effective_entry_cost = (
+            entry_fill
+            * (1 + COMMISSION_PCT)
+        )
+
+        max_shares_by_cash = (
+            cash
+            / effective_entry_cost
+        )
+
+        shares = min(
+            shares_by_risk,
+            max_shares_by_cash
+        )
+
+        # fractional shares
+        shares = np.floor(
+            shares
+            / MIN_SHARE_SIZE
+        ) * MIN_SHARE_SIZE
+
+        if shares < MIN_SHARE_SIZE:
+
+            skipped_cash += 1
+            continue
+
+        # ====================================================
+        # ENTRY COST
+        # ====================================================
+
+        entry_notional = (
+            shares
+            * entry_fill
+        )
+
+        entry_commission = (
+            entry_notional
+            * COMMISSION_PCT
+        )
+
+        total_entry_cost = (
+            entry_notional
+            + entry_commission
+        )
+
+        if total_entry_cost > cash:
+
+            skipped_cash += 1
+            continue
+
+        cash -= total_entry_cost
+
+        # ====================================================
+        # EXIT VALUE
+        # ====================================================
+
+        exit_notional = (
+            shares
+            * exit_fill
+        )
+
+        exit_commission = (
+            exit_notional
+            * COMMISSION_PCT
+        )
+
+        net_exit_proceeds = (
+            exit_notional
+            - exit_commission
+        )
+
+        # ====================================================
+        # REAL NET P&L
+        # ====================================================
+
+        net_pnl = (
+            net_exit_proceeds
+            - total_entry_cost
+        )
+
+        actual_risk_dollars = (
+            shares
+            * risk_per_share
+        )
+
+        net_r = (
+            net_pnl
+            / actual_risk_dollars
+            if actual_risk_dollars > 0
+            else 0
+        )
+
+        position = {
+            "Ticker":
+                trade["Ticker"],
+
+            "Signal_Date":
+                trade["Signal_Date"],
+
+            "Entry_Date":
+                trade["Entry_Date"],
+
+            "Exit_Date":
+                trade["Exit_Date"],
+
+            "Regime":
+                trade["Regime"],
+
+            "Result":
+                trade["Result"],
+
+            "Shares":
+                shares,
+
+            "Raw_Entry":
+                raw_entry,
+
+            "Entry_Fill":
+                entry_fill,
+
+            "Stop_Fill":
+                stop_fill,
+
+            "Raw_Exit":
+                raw_exit,
+
+            "Exit_Fill":
+                exit_fill,
+
+            "Risk_Budget":
+                risk_budget,
+
+            "Actual_Risk":
+                actual_risk_dollars,
+
+            "Entry_Notional":
+                entry_notional,
+
+            "Entry_Commission":
+                entry_commission,
+
+            "Exit_Commission":
+                exit_commission,
+
+            "Net_PnL":
+                net_pnl,
+
+            "Net_R":
+                net_r,
+
+            "Net_Exit_Proceeds":
+                net_exit_proceeds,
+
+            "Account_After":
+                None
+        }
+
+        open_positions.append(
+            position
+        )
+
+    # ========================================================
+    # CLOSE REMAINING POSITIONS
+    # ========================================================
+
+    if open_positions:
+
+        last_date = max(
+            p["Exit_Date"]
+            for p in open_positions
+        )
+
+        close_old_positions(
+            last_date
+            + pd.Timedelta(
+                days=1
+            )
+        )
+
+    completed = pd.DataFrame(
+        completed
+    )
+
+    completed = (
+        completed
+        .sort_values(
+            [
+                "Exit_Date",
+                "Ticker"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return (
+        completed,
+        skipped_slots,
+        skipped_cash
+    )
+
+
+# ============================================================
+# PORTFOLIO STATISTICS
+# ============================================================
+
+def calculate_portfolio_stats(
+    trades
+):
+
+    if trades.empty:
+        return None
+
+    ending_capital = (
+        STARTING_CAPITAL
+        +
+        trades[
+            "Net_PnL"
+        ].sum()
+    )
+
+    total_return_pct = (
+        (
+            ending_capital
+            / STARTING_CAPITAL
+        )
+        - 1
+    ) * 100
+
+    first_date = pd.Timestamp(
+        trades[
+            "Entry_Date"
+        ].min()
+    )
+
+    last_date = pd.Timestamp(
+        trades[
+            "Exit_Date"
+        ].max()
+    )
+
+    years = (
+        (
+            last_date
+            - first_date
+        ).days
+        / 365.25
+    )
+
+    if (
+        years > 0
+        and ending_capital > 0
+    ):
+
+        cagr = (
+            (
+                ending_capital
+                / STARTING_CAPITAL
+            )
+            ** (1 / years)
+            - 1
+        ) * 100
+
+    else:
+
+        cagr = 0
+
+    # ========================================================
+    # REALIZED EQUITY CURVE
+    # ========================================================
+
+    equity = (
+        STARTING_CAPITAL
+        +
+        trades[
+            "Net_PnL"
+        ].cumsum()
+    )
+
+    peak = equity.cummax()
+
+    drawdown_pct = (
+        (
+            equity
+            / peak
+        )
+        - 1
+    ) * 100
+
+    max_drawdown_pct = (
+        drawdown_pct.min()
+    )
+
+    profitable = (
+        trades[
+            "Net_PnL"
+        ] > 0
+    )
+
+    win_rate = (
+        profitable.mean()
+        * 100
+    )
+
+    positive = trades.loc[
+        trades[
+            "Net_PnL"
+        ] > 0,
+        "Net_PnL"
+    ]
+
+    negative = trades.loc[
+        trades[
+            "Net_PnL"
+        ] < 0,
+        "Net_PnL"
+    ]
+
+    gross_profit = (
+        positive.sum()
+    )
+
+    gross_loss = abs(
+        negative.sum()
+    )
+
+    profit_factor = (
+        gross_profit
+        / gross_loss
+        if gross_loss > 0
+        else np.inf
+    )
+
+    return {
+        "Starting_Capital":
+            STARTING_CAPITAL,
+
+        "Ending_Capital":
+            ending_capital,
+
+        "Net_Profit":
+            ending_capital
+            - STARTING_CAPITAL,
+
+        "Return_%":
+            total_return_pct,
+
+        "CAGR_%":
+            cagr,
+
+        "Trades":
+            len(trades),
+
+        "Profitable_%":
+            win_rate,
+
+        "Average_Net_R":
+            trades[
+                "Net_R"
+            ].mean(),
+
+        "Profit_Factor":
+            profit_factor,
+
+        "Max_Realized_Drawdown_%":
+            max_drawdown_pct,
+
+        "Total_Commissions":
+            (
+                trades[
+                    "Entry_Commission"
+                ].sum()
+                +
+                trades[
+                    "Exit_Commission"
+                ].sum()
+            )
+    }
+
+
+# ============================================================
+# MARKET REGIME SUMMARY
+# ============================================================
+
+def regime_summary(
+    trades
+):
+
+    if trades.empty:
+        return pd.DataFrame()
+
+    result = (
+        trades
+        .groupby(
+            "Regime"
+        )
+        .agg(
+            Trades=(
+                "Net_PnL",
+                "count"
+            ),
+
+            Net_PnL=(
+                "Net_PnL",
+                "sum"
+            ),
+
+            Avg_Net_PnL=(
+                "Net_PnL",
+                "mean"
+            ),
+
+            Avg_Net_R=(
+                "Net_R",
+                "mean"
+            ),
+
+            Profitable_Pct=(
+                "Net_PnL",
+                lambda x:
+                (
+                    x > 0
+                ).mean()
+                * 100
+            )
+        )
+    )
+
+    return result
+
+
+# ============================================================
+# YEAR SUMMARY
+# ============================================================
+
+def yearly_summary(
+    trades
+):
+
+    if trades.empty:
+        return pd.DataFrame()
+
+    df = trades.copy()
+
+    df["Year"] = (
+        pd.to_datetime(
+            df[
+                "Exit_Date"
+            ]
+        ).dt.year
+    )
+
+    return (
+        df
+        .groupby(
+            "Year"
+        )
+        .agg(
+            Trades=(
+                "Net_PnL",
+                "count"
+            ),
+
+            Net_PnL=(
+                "Net_PnL",
+                "sum"
+            ),
+
+            Avg_Net_R=(
+                "Net_R",
+                "mean"
+            ),
+
+            Profitable_Pct=(
+                "Net_PnL",
+                lambda x:
+                (
+                    x > 0
+                ).mean()
+                * 100
+            )
+        )
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("=" * 105)
+
+    print(
+        "PULLBACK BACKTEST V7 - REALISTIC PORTFOLIO SIMULATION"
+    )
+
+    print("=" * 105)
+
+    print()
+
+    print(
+        f"Starting capital:          ${STARTING_CAPITAL:,.2f}"
+    )
+
+    print(
+        f"Risk per trade:            {RISK_PER_TRADE * 100:.2f}%"
+    )
+
+    print(
+        f"Initial risk/trade:        ${STARTING_CAPITAL * RISK_PER_TRADE:.2f}"
+    )
+
+    print(
+        f"Maximum open positions:    {MAX_OPEN_POSITIONS}"
+    )
+
+    print(
+        f"Slippage per side:         {SLIPPAGE_PCT * 100:.3f}%"
+    )
+
+    print(
+        f"Transaction cost/side:     {COMMISSION_PCT * 100:.3f}%"
+    )
+
+    print()
+
+    # ========================================================
+    # DOWNLOAD STOCK DATA
+    # ========================================================
+
+    print(
+        f"Downloading {len(TICKERS)} stocks..."
+    )
+
+    try:
+
+        all_data = yf.download(
+            TICKERS,
+            period="5y",
+            interval="1d",
+            group_by="ticker",
+            progress=False,
+            auto_adjust=True,
+            repair=True,
+            threads=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"DOWNLOAD ERROR: "
+            f"{type(e).__name__}: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # QQQ
+    # ========================================================
+
+    try:
+
+        qqq = (
+            get_qqq_regime_data()
+        )
+
+    except Exception as e:
+
+        print(
+            f"QQQ ERROR: "
+            f"{type(e).__name__}: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # GENERATE SIGNALS
+    # ========================================================
+
+    candidates, diagnostics = (
+        generate_candidates(
+            all_data,
+            qqq
+        )
+    )
+
+    if candidates.empty:
+
+        print(
+            "NO CANDIDATES FOUND."
+        )
+
+        return
+
+    print()
+
+    print(
+        f"Valid V6 candidates:        {len(candidates)}"
+    )
+
+    # ========================================================
+    # PORTFOLIO
+    # ========================================================
+
+    (
+        portfolio_trades,
+        skipped_slots,
+        skipped_cash
+    ) = simulate_portfolio(
+        candidates
+    )
+
+    if portfolio_trades.empty:
+
+        print(
+            "NO PORTFOLIO TRADES EXECUTED."
+        )
+
+        return
+
+    # ========================================================
+    # RESULTS
+    # ========================================================
+
+    stats = (
+        calculate_portfolio_stats(
+            portfolio_trades
         )
     )
 
     print()
 
-    print("=" * 100)
-    print("V6 - ALL DATA")
-    print("=" * 100)
+    print("=" * 105)
+    print("V7 - REAL ACCOUNT RESULTS")
+    print("=" * 105)
 
     print(
-        overall.round(3)
+        f"Starting capital:             ${stats['Starting_Capital']:,.2f}"
+    )
+
+    print(
+        f"Ending capital:               ${stats['Ending_Capital']:,.2f}"
+    )
+
+    print(
+        f"Net profit:                   ${stats['Net_Profit']:,.2f}"
+    )
+
+    print(
+        f"Total return:                 {stats['Return_%']:.2f}%"
+    )
+
+    print(
+        f"CAGR:                         {stats['CAGR_%']:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Executed trades:              {stats['Trades']}"
+    )
+
+    print(
+        f"Profitable trades:            {stats['Profitable_%']:.2f}%"
+    )
+
+    print(
+        f"Average net R/trade:          {stats['Average_Net_R']:.3f}R"
+    )
+
+    print(
+        f"Profit factor:                {stats['Profit_Factor']:.3f}"
+    )
+
+    print(
+        f"Max realized drawdown:        {stats['Max_Realized_Drawdown_%']:.2f}%"
+    )
+
+    print(
+        f"Total simulated commissions:  ${stats['Total_Commissions']:.2f}"
+    )
+
+    # ========================================================
+    # PORTFOLIO LIMITS
+    # ========================================================
+
+    print()
+
+    print("=" * 105)
+    print("PORTFOLIO CONSTRAINTS")
+    print("=" * 105)
+
+    print(
+        f"Candidates generated:         {len(candidates)}"
+    )
+
+    print(
+        f"Trades executed:              {len(portfolio_trades)}"
+    )
+
+    print(
+        f"Skipped - max positions:      {skipped_slots}"
+    )
+
+    print(
+        f"Skipped - insufficient cash:  {skipped_cash}"
+    )
+
+    # ========================================================
+    # MARKET REGIME
+    # ========================================================
+
+    regime = (
+        regime_summary(
+            portfolio_trades
+        )
+    )
+
+    print()
+
+    print("=" * 105)
+    print("QQQ MARKET REGIME")
+    print("=" * 105)
+
+    print(
+        regime
+        .round(3)
         .to_string()
     )
 
     # ========================================================
-    # WALK-FORWARD / YEAR BY YEAR
+    # YEAR BY YEAR
     # ========================================================
 
-    years = sorted(
-        trades[
-            "Year"
-        ].unique()
+    yearly = (
+        yearly_summary(
+            portfolio_trades
+        )
     )
 
     print()
 
-    print("=" * 100)
-    print("V6 - YEAR-BY-YEAR WALK-FORWARD CHECK")
-    print("=" * 100)
-
-    yearly_results = []
-
-    for year in years:
-
-        year_trades = trades[
-            trades["Year"]
-            == year
-        ].copy()
-
-        comparison = (
-            build_comparison(
-                year_trades
-            )
-        )
-
-        for strategy in (
-            comparison.index
-        ):
-
-            row = comparison.loc[
-                strategy
-            ]
-
-            yearly_results.append(
-                {
-                    "Year":
-                        year,
-
-                    "Strategy":
-                        strategy,
-
-                    "Trades":
-                        row["Trades"],
-
-                    "Profitable_%":
-                        row[
-                            "Profitable_%"
-                        ],
-
-                    "Total_R":
-                        row[
-                            "Total_R"
-                        ],
-
-                    "Avg_R":
-                        row[
-                            "Avg_R"
-                        ],
-
-                    "Profit_Factor":
-                        row[
-                            "Profit_Factor"
-                        ],
-
-                    "Max_DD_R":
-                        row[
-                            "Max_Drawdown_R"
-                        ]
-                }
-            )
-
-    yearly_df = pd.DataFrame(
-        yearly_results
-    )
+    print("=" * 105)
+    print("YEAR-BY-YEAR REAL ACCOUNT")
+    print("=" * 105)
 
     print(
-        yearly_df.round(3)
-        .to_string(
-            index=False
-        )
+        yearly
+        .round(3)
+        .to_string()
     )
 
     # ========================================================
-    # YEAR CONSISTENCY
+    # SIGNAL DIAGNOSTICS
     # ========================================================
 
     print()
 
-    print("=" * 100)
-    print("V6 - CONSISTENCY CHECK")
-    print("=" * 100)
-
-    for strategy in [
-        "Fixed 2R",
-        "50% 2R + 50% 4R / BE"
-    ]:
-
-        subset = yearly_df[
-            yearly_df[
-                "Strategy"
-            ]
-            == strategy
-        ]
-
-        positive_years = (
-            subset[
-                "Total_R"
-            ] > 0
-        ).sum()
-
-        negative_years = (
-            subset[
-                "Total_R"
-            ] < 0
-        ).sum()
-
-        avg_yearly_r = (
-            subset[
-                "Avg_R"
-            ].mean()
-        )
-
-        print()
-        print(strategy)
-
-        print(
-            f"Positive years:       "
-            f"{positive_years}/{len(subset)}"
-        )
-
-        print(
-            f"Negative years:       "
-            f"{negative_years}/{len(subset)}"
-        )
-
-        print(
-            f"Average yearly Avg R: "
-            f"{avg_yearly_r:.3f}R"
-        )
-
-    # ========================================================
-    # RECENT PERIOD
-    # ========================================================
-
-    recent = trades[
-        trades[
-            "Signal_Date"
-        ]
-        >= pd.Timestamp(
-            "2025-01-01"
-        )
-    ].copy()
-
-    print()
-
-    print("=" * 100)
-    print("V6 - 2025+ CHECK")
-    print("=" * 100)
-
-    if not recent.empty:
-
-        recent_results = (
-            build_comparison(
-                recent
-            )
-        )
-
-        print(
-            recent_results
-            .round(3)
-            .to_string()
-        )
-
-    # ========================================================
-    # SIGNAL COUNTS
-    # ========================================================
-
-    print()
-
-    print("=" * 100)
-    print("FILTER DIAGNOSTICS")
-    print("=" * 100)
+    print("=" * 105)
+    print("SIGNAL DIAGNOSTICS")
+    print("=" * 105)
 
     print(
-        f"Final trades:                 {len(trades)}"
+        f"Rejected trend:              {diagnostics['Rejected_Trend']}"
     )
 
     print(
-        f"Rejected by trend filters:    {rejected_trend}"
+        f"Rejected candle:             {diagnostics['Rejected_Candle']}"
     )
 
     print(
-        f"Rejected by candle filters:   {rejected_candle}"
+        f"Rejected stop:               {diagnostics['Rejected_Stop']}"
     )
 
     print(
-        f"Rejected small stops:         {rejected_stop}"
-    )
-
-    print(
-        f"Expired setups:               {expired}"
-    )
-
-    print()
-
-    print(
-        f"Partial trades reaching 2R:   "
-        f"{trades['Partial_Hit_2R'].sum()}"
-    )
-
-    print(
-        f"Partial trades reaching 4R:   "
-        f"{trades['Partial_Hit_4R'].sum()}"
+        f"Expired setups:              {diagnostics['Expired']}"
     )
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    trades.to_csv(
-        "backtest_v6_trades.csv",
+    portfolio_trades.to_csv(
+        "backtest_v7_trades.csv",
         index=False
     )
 
-    overall.to_csv(
-        "backtest_v6_overall.csv"
+    candidates.to_csv(
+        "backtest_v7_candidates.csv",
+        index=False
     )
 
-    yearly_df.to_csv(
-        "backtest_v6_yearly.csv",
-        index=False
+    regime.to_csv(
+        "backtest_v7_regime.csv"
+    )
+
+    yearly.to_csv(
+        "backtest_v7_yearly.csv"
     )
 
     print()
 
-    print("=" * 100)
+    print("=" * 105)
 
-    print(
-        "Saved:"
-    )
-
-    print(
-        "  backtest_v6_trades.csv"
-    )
-
-    print(
-        "  backtest_v6_overall.csv"
-    )
-
-    print(
-        "  backtest_v6_yearly.csv"
-    )
+    print("Saved:")
+    print("  backtest_v7_trades.csv")
+    print("  backtest_v7_candidates.csv")
+    print("  backtest_v7_regime.csv")
+    print("  backtest_v7_yearly.csv")
 
     print()
 
     print(
-        "Pullback V6 completed."
+        "Pullback V7 completed."
     )
 
 
