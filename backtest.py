@@ -1,8 +1,6 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import os
-import time
 
 
 # ============================================================
@@ -31,12 +29,20 @@ STATIC_FALLBACK_TICKERS = [
 
 ENTRY_BUFFER = 0.15
 
+# Swing = χαμηλότερο/υψηλότερο από 3 candles αριστερά και δεξιά
 SWING_LOOKBACK = 3
 
+# Stop λίγο κάτω από το Swing Low
 SL_BUFFER = 0.05
 
+# Δεν δεχόμαστε setup με μικρότερο theoretical R:R
 MIN_RR = 2.0
 
+# Μετά το signal, δίνουμε 3 trading days για να γίνει breakout
+ENTRY_VALID_DAYS = 3
+
+# Μετά το πραγματικό entry, το trade μπορεί να μείνει ανοιχτό
+# έως 10 trading days
 MAX_HOLDING_DAYS = 10
 
 
@@ -49,7 +55,6 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
 
     gain = delta.where(delta > 0, 0.0)
-
     loss = -delta.where(delta < 0, 0.0)
 
     avg_gain = gain.ewm(
@@ -64,25 +69,36 @@ def calculate_rsi(series, period=14):
 
     rs = avg_gain / avg_loss
 
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 
 # ============================================================
-# FIND CONFIRMED SWING LOW
+# PREVIOUS CONFIRMED SWING LOW
 # ============================================================
 
 def find_previous_swing_low(df, signal_index):
 
-    start = SWING_LOOKBACK
+    """
+    Βρίσκει το πιο πρόσφατο Swing Low που ήταν ήδη
+    επιβεβαιωμένο πριν από το signal candle.
 
-    end = signal_index - SWING_LOOKBACK
+    Έτσι αποφεύγουμε look-ahead bias.
+    """
 
-    if end <= start:
+    earliest = SWING_LOOKBACK
+
+    # Το swing πρέπει να έχει ήδη SWING_LOOKBACK candles
+    # στα δεξιά του πριν φτάσουμε στο signal.
+    latest_candidate = signal_index - SWING_LOOKBACK - 1
+
+    if latest_candidate < earliest:
         return None
 
-    for i in range(end - 1, start - 1, -1):
+    for i in range(
+        latest_candidate,
+        earliest - 1,
+        -1
+    ):
 
         current_low = float(df["Low"].iloc[i])
 
@@ -95,28 +111,41 @@ def find_previous_swing_low(df, signal_index):
         ]
 
         if (
-            current_low < left_lows.min()
-            and current_low < right_lows.min()
+            current_low < float(left_lows.min())
+            and current_low < float(right_lows.min())
         ):
-            return current_low
+            return {
+                "price": current_low,
+                "index": i,
+                "date": df.index[i]
+            }
 
     return None
 
 
 # ============================================================
-# FIND CONFIRMED SWING HIGH
+# PREVIOUS CONFIRMED SWING HIGH
 # ============================================================
 
 def find_previous_swing_high(df, signal_index):
 
-    start = SWING_LOOKBACK
+    """
+    Βρίσκει το πιο πρόσφατο επιβεβαιωμένο Swing High
+    πριν από το signal candle.
+    """
 
-    end = signal_index - SWING_LOOKBACK
+    earliest = SWING_LOOKBACK
 
-    if end <= start:
+    latest_candidate = signal_index - SWING_LOOKBACK - 1
+
+    if latest_candidate < earliest:
         return None
 
-    for i in range(end - 1, start - 1, -1):
+    for i in range(
+        latest_candidate,
+        earliest - 1,
+        -1
+    ):
 
         current_high = float(df["High"].iloc[i])
 
@@ -129,16 +158,20 @@ def find_previous_swing_high(df, signal_index):
         ]
 
         if (
-            current_high > left_highs.max()
-            and current_high > right_highs.max()
+            current_high > float(left_highs.max())
+            and current_high > float(right_highs.max())
         ):
-            return current_high
+            return {
+                "price": current_high,
+                "index": i,
+                "date": df.index[i]
+            }
 
     return None
 
 
 # ============================================================
-# CHECK TRADE RESULT
+# SIMULATE TRADE
 # ============================================================
 
 def simulate_trade(
@@ -148,74 +181,79 @@ def simulate_trade(
     sl,
     tp
 ):
+
     """
-    Simulates what happens AFTER the signal candle.
+    1. Το Entry μπορεί να ενεργοποιηθεί μόνο μέσα στις
+       επόμενες ENTRY_VALID_DAYS.
 
-    Entry is activated only if a future day's HIGH reaches Entry.
+    2. Αν δεν ενεργοποιηθεί -> NO_ENTRY.
 
-    Once entry occurs:
+    3. Από τη στιγμή που ενεργοποιείται, το trade κρατιέται
+       maximum MAX_HOLDING_DAYS.
 
-        SL hit first  -> LOSS (-1R)
-        TP hit first  -> WIN (+R)
-        Neither       -> exit after MAX_HOLDING_DAYS
-
-    IMPORTANT:
-    If both SL and TP are touched during the same candle,
-    we use the conservative assumption that SL was hit first.
+    4. Αν SL και TP εμφανίζονται στο ίδιο daily candle,
+       θεωρούμε συντηρητικά ότι χτυπήθηκε πρώτα το SL.
     """
+
+    risk = entry - sl
+
+    if risk <= 0:
+        return None
+
+    # ========================================================
+    # FIND ENTRY
+    # ========================================================
+
+    first_possible_entry = signal_index + 1
+
+    last_possible_entry = min(
+        signal_index + ENTRY_VALID_DAYS,
+        len(df) - 1
+    )
 
     entry_index = None
 
-    # --------------------------------------------------------
-    # WAIT FOR ENTRY
-    # --------------------------------------------------------
-
     for i in range(
-        signal_index + 1,
-        len(df)
+        first_possible_entry,
+        last_possible_entry + 1
     ):
 
-        high = float(df["High"].iloc[i])
+        day_high = float(df["High"].iloc[i])
 
-        if high >= entry:
-
+        if day_high >= entry:
             entry_index = i
-
             break
 
-    # Entry never happened
+    # Setup expired
     if entry_index is None:
 
         return {
             "Result": "NO_ENTRY",
             "R_Multiple": 0.0,
             "Entry_Index": None,
-            "Exit_Index": None
+            "Exit_Index": None,
+            "Exit_Price": None
         }
 
-    # --------------------------------------------------------
-    # AFTER ENTRY
-    # --------------------------------------------------------
+    # ========================================================
+    # MANAGE OPEN TRADE
+    # ========================================================
 
-    risk = entry - sl
-
-    max_exit_index = min(
+    last_holding_index = min(
         entry_index + MAX_HOLDING_DAYS - 1,
         len(df) - 1
     )
 
     for i in range(
         entry_index,
-        max_exit_index + 1
+        last_holding_index + 1
     ):
 
         day_high = float(df["High"].iloc[i])
         day_low = float(df["Low"].iloc[i])
 
         # ----------------------------------------------------
-        # BOTH SL AND TP HIT SAME DAY
-        # Conservative assumption:
-        # SL happens first.
+        # Same-day ambiguity
         # ----------------------------------------------------
 
         if day_low <= sl and day_high >= tp:
@@ -224,7 +262,8 @@ def simulate_trade(
                 "Result": "LOSS",
                 "R_Multiple": -1.0,
                 "Entry_Index": entry_index,
-                "Exit_Index": i
+                "Exit_Index": i,
+                "Exit_Price": sl
             }
 
         # ----------------------------------------------------
@@ -237,7 +276,8 @@ def simulate_trade(
                 "Result": "LOSS",
                 "R_Multiple": -1.0,
                 "Entry_Index": entry_index,
-                "Exit_Index": i
+                "Exit_Index": i,
+                "Exit_Price": sl
             }
 
         # ----------------------------------------------------
@@ -247,22 +287,22 @@ def simulate_trade(
         if day_high >= tp:
 
             reward = tp - entry
-
             r_multiple = reward / risk
 
             return {
                 "Result": "WIN",
                 "R_Multiple": r_multiple,
                 "Entry_Index": entry_index,
-                "Exit_Index": i
+                "Exit_Index": i,
+                "Exit_Price": tp
             }
 
-    # --------------------------------------------------------
+    # ========================================================
     # TIME EXIT
-    # --------------------------------------------------------
+    # ========================================================
 
     exit_price = float(
-        df["Close"].iloc[max_exit_index]
+        df["Close"].iloc[last_holding_index]
     )
 
     r_multiple = (
@@ -273,7 +313,8 @@ def simulate_trade(
         "Result": "TIME_EXIT",
         "R_Multiple": r_multiple,
         "Entry_Index": entry_index,
-        "Exit_Index": max_exit_index
+        "Exit_Index": last_holding_index,
+        "Exit_Price": exit_price
     }
 
 
@@ -284,20 +325,21 @@ def simulate_trade(
 def main():
 
     print("=" * 70)
-    print("SWING TRADING BACKTEST")
+    print("SWING TRADING BACKTEST - V2")
     print("=" * 70)
 
     print()
-    print(f"Entry buffer:       ${ENTRY_BUFFER}")
-    print(f"Swing lookback:     {SWING_LOOKBACK}")
-    print(f"SL buffer:           ${SL_BUFFER}")
-    print(f"Minimum R:R:         {MIN_RR}")
-    print(f"Max holding days:    {MAX_HOLDING_DAYS}")
+    print(f"Entry buffer:          ${ENTRY_BUFFER}")
+    print(f"Entry validity:         {ENTRY_VALID_DAYS} trading days")
+    print(f"Swing lookback:         {SWING_LOOKBACK}")
+    print(f"SL buffer:             ${SL_BUFFER}")
+    print(f"Minimum R:R:            {MIN_RR}")
+    print(f"Max holding period:     {MAX_HOLDING_DAYS} trading days")
     print()
 
-    # --------------------------------------------------------
-    # DOWNLOAD DATA
-    # --------------------------------------------------------
+    # ========================================================
+    # DOWNLOAD
+    # ========================================================
 
     tickers = STATIC_FALLBACK_TICKERS
 
@@ -312,36 +354,32 @@ def main():
             period="5y",
             group_by="ticker",
             progress=False,
-            auto_adjust=False,
+
+            # IMPORTANT:
+            # adjusted OHLC for splits/corporate actions
+            auto_adjust=True,
+
             threads=True
         )
 
     except Exception as e:
 
         print(
-            f"ERROR downloading data: "
+            f"DOWNLOAD ERROR: "
             f"{type(e).__name__}: {e}"
         )
 
         return
 
-    # --------------------------------------------------------
-    # ALL TRADES
-    # --------------------------------------------------------
-
     all_trades = []
 
     # ========================================================
-    # LOOP THROUGH TICKERS
+    # EACH TICKER
     # ========================================================
 
     for ticker in tickers:
 
         try:
-
-            # ------------------------------------------------
-            # CHECK DATA
-            # ------------------------------------------------
 
             if ticker not in all_data.columns.get_level_values(0):
 
@@ -363,9 +401,9 @@ def main():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # INDICATORS
-            # ------------------------------------------------
+            # =================================================
 
             df["SMA_200"] = (
                 df["Close"]
@@ -399,50 +437,30 @@ def main():
                 14
             )
 
-            # ------------------------------------------------
-            # WALK FORWARD THROUGH HISTORY
-            # ------------------------------------------------
+            # =================================================
+            # WALK FORWARD
+            # =================================================
 
-            # Start after enough data exists for indicators.
-            #
-            # We intentionally stop before the very end because
-            # a future period is required to simulate the trade.
+            signal_index = 210
 
-            first_index = 210
-
-            last_index = (
-                len(df)
-                - MAX_HOLDING_DAYS
-                - 1
-            )
-
-            for signal_index in range(
-                first_index,
-                last_index
-            ):
+            while signal_index < len(df) - 1:
 
                 row = df.iloc[signal_index]
 
                 price = float(row["Close"])
-
                 high = float(row["High"])
-
                 low = float(row["Low"])
 
                 volume = float(row["Volume"])
-
                 avg_vol = float(row["Avg_Vol_20"])
 
                 sma200 = float(row["SMA_200"])
-
                 sma50 = float(row["SMA_50"])
-
                 ema20 = float(row["EMA_20"])
-
                 rsi = float(row["RSI_14"])
 
                 # ------------------------------------------------
-                # CHECK NaN
+                # NaN
                 # ------------------------------------------------
 
                 if any(
@@ -459,38 +477,38 @@ def main():
                         rsi
                     ]
                 ):
+                    signal_index += 1
                     continue
 
                 # =================================================
-                # ORIGINAL SCREENING RULES
+                # SIGNAL RULES
                 # =================================================
 
-                # 1. Price above SMA200
-
+                # Long-term bullish trend
                 if price < sma200:
+                    signal_index += 1
                     continue
 
-                # 2. RSI pullback
-
+                # Pullback RSI
                 if not (35 <= rsi <= 55):
+                    signal_index += 1
                     continue
 
-                # 3. Pullback to EMA20 or SMA50
-
+                # Touch EMA20
                 touched_ema20 = (
                     ema20 * 0.99
                     <= low
                     <= ema20 * 1.01
                 )
 
+                # Touch SMA50
                 touched_sma50 = (
                     sma50 * 0.99
                     <= low
                     <= sma50 * 1.01
                 )
 
-                # 4. Close above support
-
+                # Close back above support
                 closed_above = (
                     price >= ema20
                     or price >= sma50
@@ -500,6 +518,7 @@ def main():
                     (touched_ema20 or touched_sma50)
                     and closed_above
                 ):
+                    signal_index += 1
                     continue
 
                 # =================================================
@@ -507,11 +526,8 @@ def main():
                 # =================================================
 
                 if volume > avg_vol:
-
                     volume_status = "HIGH"
-
                 else:
-
                     volume_status = "AVERAGE"
 
                 # =================================================
@@ -524,13 +540,16 @@ def main():
                 # SWING LOW
                 # =================================================
 
-                swing_low = find_previous_swing_low(
+                swing_low_data = find_previous_swing_low(
                     df,
                     signal_index
                 )
 
-                if swing_low is None:
+                if swing_low_data is None:
+                    signal_index += 1
                     continue
+
+                swing_low = swing_low_data["price"]
 
                 # =================================================
                 # STOP LOSS
@@ -539,19 +558,23 @@ def main():
                 sl = swing_low - SL_BUFFER
 
                 if sl >= entry:
+                    signal_index += 1
                     continue
 
                 # =================================================
                 # SWING HIGH
                 # =================================================
 
-                swing_high = find_previous_swing_high(
+                swing_high_data = find_previous_swing_high(
                     df,
                     signal_index
                 )
 
-                if swing_high is None:
+                if swing_high_data is None:
+                    signal_index += 1
                     continue
+
+                swing_high = swing_high_data["price"]
 
                 # =================================================
                 # TAKE PROFIT
@@ -560,6 +583,7 @@ def main():
                 tp = swing_high
 
                 if tp <= entry:
+                    signal_index += 1
                     continue
 
                 # =================================================
@@ -567,16 +591,20 @@ def main():
                 # =================================================
 
                 risk = entry - sl
-
                 reward = tp - entry
+
+                if risk <= 0:
+                    signal_index += 1
+                    continue
 
                 rr = reward / risk
 
                 if rr < MIN_RR:
+                    signal_index += 1
                     continue
 
                 # =================================================
-                # SIMULATE TRADE
+                # SIMULATE
                 # =================================================
 
                 trade_result = simulate_trade(
@@ -587,48 +615,99 @@ def main():
                     tp=tp
                 )
 
-                # ------------------------------------------------
-                # NO ENTRY = NOT A TRADE
-                # ------------------------------------------------
-
-                if trade_result["Result"] == "NO_ENTRY":
+                if trade_result is None:
+                    signal_index += 1
                     continue
 
-                # ------------------------------------------------
-                # STORE TRADE
-                # ------------------------------------------------
+                # =================================================
+                # SETUP EXPIRED WITHOUT ENTRY
+                # =================================================
 
-                entry_date = df.index[
-                    trade_result["Entry_Index"]
-                ]
+                if trade_result["Result"] == "NO_ENTRY":
 
-                exit_date = df.index[
-                    trade_result["Exit_Index"]
-                ]
+                    # Δεν υπήρξε trade.
+                    #
+                    # Προχωράμε μετά το παράθυρο όπου
+                    # περιμέναμε το breakout.
+
+                    signal_index += ENTRY_VALID_DAYS + 1
+                    continue
+
+                # =================================================
+                # ACTUAL TRADE
+                # =================================================
+
+                entry_index = trade_result["Entry_Index"]
+                exit_index = trade_result["Exit_Index"]
+
+                entry_date = df.index[entry_index]
+                exit_date = df.index[exit_index]
+
+                holding_days = (
+                    exit_index
+                    - entry_index
+                    + 1
+                )
 
                 all_trades.append(
                     {
                         "Ticker": ticker,
+
                         "Signal_Date": df.index[signal_index],
                         "Entry_Date": entry_date,
                         "Exit_Date": exit_date,
 
-                        "Signal_Close": price,
-                        "Entry": entry,
-                        "SL": sl,
-                        "TP": tp,
+                        "Signal_Close": round(price, 4),
+                        "Signal_High": round(high, 4),
+                        "Signal_Low": round(low, 4),
 
-                        "Risk": risk,
-                        "Reward": reward,
-                        "RR": rr,
+                        "Entry": round(entry, 4),
+                        "SL": round(sl, 4),
+                        "TP": round(tp, 4),
+                        "Exit_Price": round(
+                            trade_result["Exit_Price"],
+                            4
+                        ),
 
-                        "RSI": rsi,
+                        "Swing_Low": round(
+                            swing_low,
+                            4
+                        ),
+
+                        "Swing_High": round(
+                            swing_high,
+                            4
+                        ),
+
+                        "Risk": round(risk, 4),
+                        "Reward": round(reward, 4),
+
+                        "RR": round(rr, 4),
+
+                        "RSI": round(rsi, 2),
+
                         "Volume_Status": volume_status,
 
+                        "Holding_Days": holding_days,
+
                         "Result": trade_result["Result"],
-                        "R": trade_result["R_Multiple"]
+
+                        "R": round(
+                            trade_result["R_Multiple"],
+                            4
+                        )
                     }
                 )
+
+                # =================================================
+                # NO OVERLAPPING TRADES
+                # =================================================
+
+                # Εφόσον έχουμε ανοιχτό trade έως το exit_index,
+                # δεν ψάχνουμε νέα signals στην ίδια μετοχή
+                # όσο το trade είναι ανοιχτό.
+
+                signal_index = exit_index + 1
 
         except Exception as e:
 
@@ -640,7 +719,7 @@ def main():
             continue
 
     # ========================================================
-    # CREATE RESULTS DATAFRAME
+    # NO TRADES
     # ========================================================
 
     if not all_trades:
@@ -650,10 +729,19 @@ def main():
 
         return
 
+    # ========================================================
+    # DATAFRAME
+    # ========================================================
+
     trades = pd.DataFrame(all_trades)
 
+    # Sort chronologically across ALL companies
+    trades = trades.sort_values(
+        ["Entry_Date", "Ticker"]
+    ).reset_index(drop=True)
+
     # ========================================================
-    # BASIC STATISTICS
+    # RESULTS
     # ========================================================
 
     total_trades = len(trades)
@@ -670,51 +758,68 @@ def main():
         trades["Result"] == "TIME_EXIT"
     ).sum()
 
-    closed_trades = wins + losses + time_exits
+    positive_trades = (
+        trades["R"] > 0
+    ).sum()
 
+    negative_trades = (
+        trades["R"] < 0
+    ).sum()
+
+    breakeven_trades = (
+        trades["R"] == 0
+    ).sum()
+
+    # Traditional TP win-rate
     win_rate = (
-        wins / closed_trades * 100
-        if closed_trades > 0
-        else 0
+        wins / total_trades * 100
     )
 
-    # ========================================================
-    # R STATISTICS
-    # ========================================================
+    # Any trade that actually made money,
+    # including positive time exits
+    profitable_trade_rate = (
+        positive_trades
+        / total_trades
+        * 100
+    )
 
-    total_R = trades["R"].sum()
+    total_r = trades["R"].sum()
 
-    average_R = trades["R"].mean()
+    average_r = trades["R"].mean()
 
-    winning_trades = trades[
+    median_r = trades["R"].median()
+
+    positive = trades[
         trades["R"] > 0
     ]
 
-    losing_trades = trades[
+    negative = trades[
         trades["R"] < 0
     ]
 
-    average_win_R = (
-        winning_trades["R"].mean()
-        if not winning_trades.empty
+    avg_positive_r = (
+        positive["R"].mean()
+        if not positive.empty
         else 0
     )
 
-    average_loss_R = (
-        losing_trades["R"].mean()
-        if not losing_trades.empty
+    avg_negative_r = (
+        negative["R"].mean()
+        if not negative.empty
         else 0
     )
 
     gross_profit = (
-        winning_trades["R"].sum()
-        if not winning_trades.empty
+        positive["R"].sum()
+        if not positive.empty
         else 0
     )
 
-    gross_loss = abs(
-        losing_trades["R"].sum()
-    ) if not losing_trades.empty else 0
+    gross_loss = (
+        abs(negative["R"].sum())
+        if not negative.empty
+        else 0
+    )
 
     profit_factor = (
         gross_profit / gross_loss
@@ -723,38 +828,41 @@ def main():
     )
 
     # ========================================================
-    # EQUITY CURVE
+    # EQUITY CURVE IN R
     # ========================================================
 
     trades["Cumulative_R"] = (
         trades["R"].cumsum()
     )
 
-    trades["Peak_R"] = (
+    # Include starting equity = 0R
+    running_peak = (
         trades["Cumulative_R"]
+        .clip(lower=0)
         .cummax()
     )
+
+    trades["Peak_R"] = running_peak
 
     trades["Drawdown_R"] = (
         trades["Cumulative_R"]
         - trades["Peak_R"]
     )
 
-    max_drawdown_R = (
+    max_drawdown_r = (
         trades["Drawdown_R"].min()
     )
 
     # ========================================================
-    # CONSECUTIVE LOSSES
+    # CONSECUTIVE NEGATIVE TRADES
     # ========================================================
 
     max_consecutive_losses = 0
-
     current_losses = 0
 
-    for result in trades["Result"]:
+    for r in trades["R"]:
 
-        if result == "LOSS":
+        if r < 0:
 
             current_losses += 1
 
@@ -768,70 +876,146 @@ def main():
             current_losses = 0
 
     # ========================================================
-    # OUTPUT
+    # HOLDING PERIOD
+    # ========================================================
+
+    average_holding_days = (
+        trades["Holding_Days"].mean()
+    )
+
+    # ========================================================
+    # PRINT
     # ========================================================
 
     print()
     print("=" * 70)
-    print("BACKTEST RESULTS")
+    print("BACKTEST RESULTS - V2")
     print("=" * 70)
 
     print(
-        f"Total trades:          {total_trades}"
+        f"Total trades:             {total_trades}"
     )
 
     print(
-        f"Wins:                  {wins}"
+        f"TP wins:                  {wins}"
     )
 
     print(
-        f"Losses:                {losses}"
+        f"SL losses:                {losses}"
     )
 
     print(
-        f"Time exits:            {time_exits}"
-    )
-
-    print(
-        f"Win rate:              {win_rate:.2f}%"
+        f"Time exits:               {time_exits}"
     )
 
     print()
 
     print(
-        f"Total R:               {total_R:.2f}R"
+        f"TP win rate:              {win_rate:.2f}%"
     )
 
     print(
-        f"Average R/trade:       {average_R:.3f}R"
-    )
-
-    print(
-        f"Average winning R:     {average_win_R:.3f}R"
-    )
-
-    print(
-        f"Average losing R:      {average_loss_R:.3f}R"
-    )
-
-    print(
-        f"Profit factor:         {profit_factor:.2f}"
+        f"Profitable trades:        {profitable_trade_rate:.2f}%"
     )
 
     print()
 
     print(
-        f"Max drawdown:          {max_drawdown_R:.2f}R"
+        f"Total R:                  {total_r:.2f}R"
     )
 
     print(
-        f"Max consecutive losses:{max_consecutive_losses}"
+        f"Average R/trade:          {average_r:.3f}R"
     )
 
-    print("=" * 70)
+    print(
+        f"Median R/trade:           {median_r:.3f}R"
+    )
+
+    print(
+        f"Average positive trade:   {avg_positive_r:.3f}R"
+    )
+
+    print(
+        f"Average negative trade:   {avg_negative_r:.3f}R"
+    )
+
+    print(
+        f"Profit factor:            {profit_factor:.2f}"
+    )
+
+    print()
+
+    print(
+        f"Max drawdown:             {max_drawdown_r:.2f}R"
+    )
+
+    print(
+        f"Max consecutive losses:   {max_consecutive_losses}"
+    )
+
+    print(
+        f"Average holding days:     {average_holding_days:.2f}"
+    )
 
     # ========================================================
-    # PER-TICKER RESULTS
+    # EXTREME TRADES
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("EXTREME TRADES CHECK")
+    print("=" * 70)
+
+    print()
+    print("Largest theoretical R:R setups:")
+
+    largest_rr = trades.nlargest(
+        10,
+        "RR"
+    )[
+        [
+            "Ticker",
+            "Signal_Date",
+            "Entry",
+            "SL",
+            "TP",
+            "RR",
+            "Result",
+            "R"
+        ]
+    ]
+
+    print(
+        largest_rr.to_string(index=False)
+    )
+
+    print()
+    print("Largest winning trades:")
+
+    largest_winners = trades.nlargest(
+        10,
+        "R"
+    )[
+        [
+            "Ticker",
+            "Signal_Date",
+            "Entry_Date",
+            "Exit_Date",
+            "Entry",
+            "SL",
+            "TP",
+            "Result",
+            "R"
+        ]
+    ]
+
+    print(
+        largest_winners.to_string(index=False)
+    )
+
+    # ========================================================
+    # PER TICKER
     # ========================================================
 
     print()
@@ -846,19 +1030,33 @@ def main():
             Trades=("R", "count"),
             Total_R=("R", "sum"),
             Avg_R=("R", "mean"),
-            Wins=("Result", lambda x: (x == "WIN").sum()),
-            Losses=("Result", lambda x: (x == "LOSS").sum())
-        )
-        .sort_values(
-            "Total_R",
-            ascending=False
+            Median_R=("R", "median"),
+            TP_Wins=(
+                "Result",
+                lambda x: (x == "WIN").sum()
+            ),
+            SL_Losses=(
+                "Result",
+                lambda x: (x == "LOSS").sum()
+            ),
+            Time_Exits=(
+                "Result",
+                lambda x: (x == "TIME_EXIT").sum()
+            )
         )
     )
 
-    ticker_summary["Win_Rate_%"] = (
-        ticker_summary["Wins"]
-        / ticker_summary["Trades"]
+    ticker_summary["Profitable_%"] = (
+        trades
+        .assign(Profitable=trades["R"] > 0)
+        .groupby("Ticker")["Profitable"]
+        .mean()
         * 100
+    )
+
+    ticker_summary = ticker_summary.sort_values(
+        "Total_R",
+        ascending=False
     )
 
     print(
@@ -866,35 +1064,56 @@ def main():
     )
 
     # ========================================================
-    # SAVE CSV
+    # VOLUME COMPARISON
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("HIGH VOLUME VS AVERAGE VOLUME")
+    print("=" * 70)
+
+    volume_summary = (
+        trades
+        .groupby("Volume_Status")
+        .agg(
+            Trades=("R", "count"),
+            Total_R=("R", "sum"),
+            Avg_R=("R", "mean"),
+            Median_R=("R", "median")
+        )
+    )
+
+    print(
+        volume_summary.round(3)
+    )
+
+    # ========================================================
+    # SAVE FILES
     # ========================================================
 
     trades.to_csv(
-        "backtest_trades.csv",
+        "backtest_trades_v2.csv",
         index=False
     )
 
     ticker_summary.to_csv(
-        "backtest_by_ticker.csv"
+        "backtest_by_ticker_v2.csv"
+    )
+
+    volume_summary.to_csv(
+        "backtest_by_volume_v2.csv"
     )
 
     print()
-    print(
-        "Saved:"
-    )
+    print("=" * 70)
 
-    print(
-        "  backtest_trades.csv"
-    )
-
-    print(
-        "  backtest_by_ticker.csv"
-    )
+    print("Saved:")
+    print("  backtest_trades_v2.csv")
+    print("  backtest_by_ticker_v2.csv")
+    print("  backtest_by_volume_v2.csv")
 
     print()
-    print(
-        "Backtest completed."
-    )
+    print("Backtest V2 completed.")
 
 
 # ============================================================
