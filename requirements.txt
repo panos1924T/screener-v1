@@ -1,3 +1,6 @@
 yfinance
 requests
 lxml
+yfinance[repair]
+pandas
+numpy
