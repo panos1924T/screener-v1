@@ -4,8 +4,8 @@ import numpy as np
 
 
 # ============================================================
-# V13 - UNIFIED MOMENTUM
-# 1% RISK / 5 POSITIONS / FULL 2.5 ATR TRAIL
+# V14 - PULLBACK ONLY
+# 0.75% RISK / 5 POSITIONS / FULL 2.5 ATR TRAIL
 # ============================================================
 
 
@@ -15,13 +15,13 @@ import numpy as np
 
 STARTING_CAPITAL = 1000.0
 
-RISK_PER_TRADE = 0.01       # 1.00%
+RISK_PER_TRADE = 0.0075      # 0.75%
 
 MAX_POSITIONS = 5
 
-SLIPPAGE_PCT = 0.0005       # 0.05%
+SLIPPAGE_PCT = 0.0005
 
-COMMISSION_PCT = 0.0002     # 0.02%
+COMMISSION_PCT = 0.0002
 
 MIN_SHARE_SIZE = 0.0001
 
@@ -104,10 +104,7 @@ def calculate_rsi(series, period=14):
     )
 
 
-def calculate_stoch_rsi(
-    rsi,
-    period=14
-):
+def calculate_stoch_rsi(rsi, period=14):
 
     lowest = (
         rsi
@@ -136,13 +133,11 @@ def calculate_stoch_rsi(
     ) * 100
 
 
-def calculate_atr(
-    df,
-    period=14
-):
+def calculate_atr(df, period=14):
 
     previous_close = (
-        df["Close"].shift(1)
+        df["Close"]
+        .shift(1)
     )
 
     tr = pd.concat(
@@ -234,20 +229,6 @@ def prepare_stock(df):
         .mean()
     )
 
-    df["HIGH20"] = (
-        df["High"]
-        .shift(1)
-        .rolling(20)
-        .max()
-    )
-
-    df["LOW10"] = (
-        df["Low"]
-        .shift(1)
-        .rolling(10)
-        .min()
-    )
-
     df["LOW5"] = (
         df["Low"]
         .shift(1)
@@ -262,10 +243,7 @@ def prepare_stock(df):
 # MARKET DATA
 # ============================================================
 
-def download_market(
-    ticker,
-    name
-):
+def download_market(ticker, name):
 
     print(
         f"Downloading {name}..."
@@ -309,10 +287,7 @@ def download_market(
     return df
 
 
-def get_market_row(
-    df,
-    date
-):
+def get_market_row(df, date):
 
     available = df[
         df.index <= date
@@ -322,7 +297,10 @@ def get_market_row(
 
         return None
 
-    row = available.iloc[-1]
+    row = (
+        available
+        .iloc[-1]
+    )
 
     if pd.isna(
         row["SMA200"]
@@ -386,12 +364,11 @@ def market_allows_long(
 # STRONG TREND
 # ============================================================
 
-def strong_trend(
-    df,
-    i
-):
+def strong_trend(df, i):
 
-    row = df.iloc[i]
+    row = (
+        df.iloc[i]
+    )
 
     close = float(
         row["Close"]
@@ -431,12 +408,11 @@ def strong_trend(
 # QUALITY SCORE
 # ============================================================
 
-def quality_score(
-    df,
-    i
-):
+def quality_score(df, i):
 
-    row = df.iloc[i]
+    row = (
+        df.iloc[i]
+    )
 
     close = float(
         row["Close"]
@@ -494,7 +470,8 @@ def quality_score(
     close_location = (
         (
             close - low
-        ) / candle_range
+        )
+        / candle_range
         if candle_range > 0
         else 0
     )
@@ -519,13 +496,10 @@ def quality_score(
 
 
 # ============================================================
-# BREAKOUT SETUP
+# PULLBACK ONLY
 # ============================================================
 
-def breakout_setup(
-    df,
-    i
-):
+def pullback_setup(df, i):
 
     if not strong_trend(
         df,
@@ -534,147 +508,49 @@ def breakout_setup(
 
         return None
 
-    row = df.iloc[i]
-
-    close = float(row["Close"])
-    open_price = float(row["Open"])
-    high = float(row["High"])
-    low = float(row["Low"])
-
-    atr = float(row["ATR14"])
-    rsi = float(row["RSI14"])
-
-    volume = float(row["Volume"])
-    avg_volume = float(row["AVG_VOL20"])
-
-    high20 = float(row["HIGH20"])
-    low10 = float(row["LOW10"])
-
-    if not (
-        55 <= rsi <= 72
-    ):
-
-        return None
-
-    if avg_volume <= 0:
-
-        return None
-
-    relative_volume = (
-        volume / avg_volume
+    row = (
+        df.iloc[i]
     )
 
-    if relative_volume < 1.10:
-
-        return None
-
-    if close <= open_price:
-
-        return None
-
-    candle_range = (
-        high - low
+    close = float(
+        row["Close"]
     )
 
-    if candle_range <= 0:
-
-        return None
-
-    close_location = (
-        close - low
-    ) / candle_range
-
-    if close_location < 0.70:
-
-        return None
-
-    distance_to_high = (
-        high20 - close
-    ) / atr
-
-    if distance_to_high > 0.50:
-
-        return None
-
-    trigger = (
-        high20
-        + 0.05 * atr
+    open_price = float(
+        row["Open"]
     )
 
-    stop = (
-        low10
-        - 0.10 * atr
+    high = float(
+        row["High"]
     )
 
-    risk = (
-        trigger - stop
+    low = float(
+        row["Low"]
     )
 
-    if risk <= 0:
+    ema20 = float(
+        row["EMA20"]
+    )
 
-        return None
+    atr = float(
+        row["ATR14"]
+    )
 
-    if risk < (
-        0.75 * atr
-    ):
+    rsi = float(
+        row["RSI14"]
+    )
 
-        return None
+    volume = float(
+        row["Volume"]
+    )
 
-    if risk > (
-        4.0 * atr
-    ):
+    avg_volume = float(
+        row["AVG_VOL20"]
+    )
 
-        return None
-
-    return {
-        "Setup_Type":
-            "BREAKOUT",
-
-        "Trigger":
-            trigger,
-
-        "Stop":
-            stop,
-
-        "Score":
-            quality_score(
-                df,
-                i
-            )
-    }
-
-
-# ============================================================
-# PULLBACK SETUP
-# ============================================================
-
-def pullback_setup(
-    df,
-    i
-):
-
-    if not strong_trend(
-        df,
-        i
-    ):
-
-        return None
-
-    row = df.iloc[i]
-
-    close = float(row["Close"])
-    open_price = float(row["Open"])
-    high = float(row["High"])
-    low = float(row["Low"])
-
-    ema20 = float(row["EMA20"])
-    atr = float(row["ATR14"])
-    rsi = float(row["RSI14"])
-
-    volume = float(row["Volume"])
-    avg_volume = float(row["AVG_VOL20"])
-
-    low5 = float(row["LOW5"])
+    low5 = float(
+        row["LOW5"]
+    )
 
     stoch = float(
         row["STOCH_RSI"]
@@ -689,16 +565,21 @@ def pullback_setup(
 
     if (
         pd.isna(stoch)
-        or pd.isna(previous_stoch)
+        or
+        pd.isna(previous_stoch)
     ):
 
         return None
+
+    # Momentum stock after pullback
 
     if not (
         45 <= rsi <= 65
     ):
 
         return None
+
+    # Stoch RSI bullish cross above 20
 
     crossed = (
         previous_stoch
@@ -712,6 +593,8 @@ def pullback_setup(
 
         return None
 
+    # Pullback close to EMA20
+
     ema_distance = (
         abs(
             low - ema20
@@ -723,9 +606,13 @@ def pullback_setup(
 
         return None
 
+    # Reclaim / hold EMA20
+
     if close <= ema20:
 
         return None
+
+    # Bullish candle
 
     if close <= open_price:
 
@@ -832,7 +719,8 @@ def find_entry(
     ):
 
         if float(
-            df["High"].iloc[i]
+            df["High"]
+            .iloc[i]
         ) >= trigger:
 
             return i
@@ -841,12 +729,12 @@ def find_entry(
 
 
 # ============================================================
-# BASELINE FIXED 2R
+# BASELINE LIFECYCLE
 #
-# Used only to preserve the exact V11 candidate lifecycle.
+# This keeps candidate generation comparable with V11/V13.
 # ============================================================
 
-def simulate_v11_fixed(
+def simulate_baseline_lifecycle(
     df,
     entry_index,
     trigger,
@@ -854,7 +742,8 @@ def simulate_v11_fixed(
 ):
 
     entry_open = float(
-        df["Open"].iloc[
+        df["Open"]
+        .iloc[
             entry_index
         ]
     )
@@ -865,8 +754,7 @@ def simulate_v11_fixed(
     )
 
     risk = (
-        raw_entry
-        - stop
+        raw_entry - stop
     )
 
     if risk <= 0:
@@ -890,7 +778,9 @@ def simulate_v11_fixed(
         end + 1
     ):
 
-        row = df.iloc[i]
+        row = (
+            df.iloc[i]
+        )
 
         open_price = float(
             row["Open"]
@@ -944,7 +834,7 @@ def simulate_v11_fixed(
 
 
 # ============================================================
-# GENERATE V11-EQUIVALENT CANDIDATES
+# GENERATE PULLBACK CANDIDATES
 # ============================================================
 
 def generate_candidates(
@@ -958,9 +848,7 @@ def generate_candidates(
 
     rejected_market = 0
 
-    breakout_count = 0
-
-    pullback_count = 0
+    raw_pullback_signals = 0
 
     for ticker in TICKERS:
 
@@ -969,7 +857,8 @@ def generate_candidates(
             if (
                 ticker
                 not in
-                all_data.columns.get_level_values(0)
+                all_data.columns
+                .get_level_values(0)
             ):
 
                 continue
@@ -1007,51 +896,34 @@ def generate_candidates(
                     "RSI14",
                     "STOCH_RSI",
                     "AVG_VOL20",
-                    "HIGH20",
-                    "LOW10",
                     "LOW5"
                 ]
 
                 if any(
                     pd.isna(
-                        df[col].iloc[i]
+                        df[col]
+                        .iloc[i]
                     )
-                    for col in required
+                    for col
+                    in required
                 ):
 
                     i += 1
                     continue
 
-                breakout = (
-                    breakout_setup(
-                        df,
-                        i
-                    )
-                )
-
-                pullback = (
+                setup = (
                     pullback_setup(
                         df,
                         i
                     )
                 )
 
-                if breakout is not None:
-
-                    setup = breakout
-
-                    breakout_count += 1
-
-                elif pullback is not None:
-
-                    setup = pullback
-
-                    pullback_count += 1
-
-                else:
+                if setup is None:
 
                     i += 1
                     continue
+
+                raw_pullback_signals += 1
 
                 trigger = float(
                     setup[
@@ -1106,7 +978,7 @@ def generate_candidates(
                     continue
 
                 baseline = (
-                    simulate_v11_fixed(
+                    simulate_baseline_lifecycle(
                         df,
                         entry_index,
                         trigger,
@@ -1117,7 +989,6 @@ def generate_candidates(
                 if baseline is None:
 
                     i += 1
-
                     continue
 
                 baseline_exit_index = int(
@@ -1132,9 +1003,7 @@ def generate_candidates(
                             ticker,
 
                         "Setup_Type":
-                            setup[
-                                "Setup_Type"
-                            ],
+                            "PULLBACK",
 
                         "Signal_Date":
                             signal_date,
@@ -1162,8 +1031,6 @@ def generate_candidates(
                     }
                 )
 
-                # preserve exact V11 lifecycle
-
                 i = (
                     baseline_exit_index
                     + 1
@@ -1176,8 +1043,10 @@ def generate_candidates(
                 f"{type(e).__name__}: {e}"
             )
 
-    result = pd.DataFrame(
-        candidates
+    result = (
+        pd.DataFrame(
+            candidates
+        )
     )
 
     if not result.empty:
@@ -1200,14 +1069,11 @@ def generate_candidates(
         )
 
     diagnostics = {
+        "Raw_Pullback_Signals":
+            raw_pullback_signals,
+
         "Rejected_Market":
-            rejected_market,
-
-        "Breakout_Signals":
-            breakout_count,
-
-        "Pullback_Signals":
-            pullback_count
+            rejected_market
     }
 
     return (
@@ -1217,7 +1083,7 @@ def generate_candidates(
 
 
 # ============================================================
-# FULL 2.5 ATR TRAIL
+# 2.5 ATR TRAILING EXIT
 # ============================================================
 
 def create_25atr_plan(
@@ -1263,7 +1129,9 @@ def create_25atr_plan(
         end + 1
     ):
 
-        row = df.iloc[i]
+        row = (
+            df.iloc[i]
+        )
 
         open_price = float(
             row["Open"]
@@ -1281,8 +1149,6 @@ def create_25atr_plan(
             row["ATR14"]
         )
 
-        # Uses prior known highest close
-
         calculated_trail = (
             highest_close
             - ATR_TRAIL_MULT
@@ -1293,8 +1159,6 @@ def create_25atr_plan(
             trail,
             calculated_trail
         )
-
-        # gap below trail
 
         if open_price < trail:
 
@@ -1333,7 +1197,8 @@ def create_25atr_plan(
 
         "Raw_Exit":
             float(
-                df["Close"].iloc[
+                df["Close"]
+                .iloc[
                     end
                 ]
             ),
@@ -1358,19 +1223,23 @@ def create_trade_plans(
         candidates.iterrows()
     ):
 
-        ticker = trade[
-            "Ticker"
-        ]
+        ticker = (
+            trade[
+                "Ticker"
+            ]
+        )
 
         if ticker not in prepared_data:
 
             continue
 
-        df = prepared_data[
-            ticker
-        ]
+        df = (
+            prepared_data[
+                ticker
+            ]
+        )
 
-        result = (
+        exit_result = (
             create_25atr_plan(
                 df,
                 trade
@@ -1378,7 +1247,7 @@ def create_trade_plans(
         )
 
         exit_index = int(
-            result[
+            exit_result[
                 "Exit_Index"
             ]
         )
@@ -1396,46 +1265,27 @@ def create_trade_plans(
 
                 "Raw_Exit":
                     float(
-                        result[
+                        exit_result[
                             "Raw_Exit"
                         ]
                     ),
 
                 "Exit_Reason":
-                    result[
+                    exit_result[
                         "Exit_Reason"
                     ]
             }
         )
 
-    result = pd.DataFrame(
-        plans
-    )
-
-    if not result.empty:
-
-        result = (
-            result
-            .sort_values(
-                [
-                    "Entry_Date",
-                    "Score"
-                ],
-                ascending=[
-                    True,
-                    False
-                ]
-            )
-            .reset_index(
-                drop=True
-            )
+    return (
+        pd.DataFrame(
+            plans
         )
-
-    return result
+    )
 
 
 # ============================================================
-# CLOSE FOR MTM
+# MTM CLOSE
 # ============================================================
 
 def get_close(
@@ -1446,9 +1296,11 @@ def get_close(
 
     try:
 
-        df = all_data[
-            ticker
-        ]
+        df = (
+            all_data[
+                ticker
+            ]
+        )
 
         available = (
             df.loc[
@@ -1512,16 +1364,13 @@ def simulate_portfolio(
     calendar = (
         qqq.loc[
             (
-                qqq.index
-                >= backtest_start
+                qqq.index >= backtest_start
             )
             &
             (
-                qqq.index
-                <= final_date
+                qqq.index <= final_date
             )
-        ]
-        .index
+        ].index
     )
 
     cash = (
@@ -1546,8 +1395,10 @@ def simulate_portfolio(
 
     for date in calendar:
 
-        date = pd.Timestamp(
-            date
+        date = (
+            pd.Timestamp(
+                date
+            )
         )
 
         # ====================================================
@@ -1708,9 +1559,7 @@ def simulate_portfolio(
                             ],
 
                         "Setup_Type":
-                            trade[
-                                "Setup_Type"
-                            ],
+                            "PULLBACK",
 
                         "Signal_Date":
                             trade[
@@ -1780,14 +1629,12 @@ def simulate_portfolio(
 
                 continue
 
-            raw_exit = float(
-                position[
-                    "Raw_Exit"
-                ]
-            )
-
             exit_fill = (
-                raw_exit
+                float(
+                    position[
+                        "Raw_Exit"
+                    ]
+                )
                 * (
                     1
                     - SLIPPAGE_PCT
@@ -1875,20 +1722,20 @@ def simulate_portfolio(
         # MARK TO MARKET
         # ====================================================
 
-        market_value = (
-            0.0
-        )
+        market_value = 0.0
 
         for position in (
             open_positions
         ):
 
-            price = get_close(
-                all_data,
-                position[
-                    "Ticker"
-                ],
-                date
+            price = (
+                get_close(
+                    all_data,
+                    position[
+                        "Ticker"
+                    ],
+                    date
+                )
             )
 
             if price is None:
@@ -1974,7 +1821,7 @@ def calculate_stats(
         ].iloc[-1]
     )
 
-    return_pct = (
+    total_return = (
         (
             ending
             / STARTING_CAPITAL
@@ -1982,16 +1829,20 @@ def calculate_stats(
         - 1
     ) * 100
 
-    first_date = pd.Timestamp(
-        equity[
-            "Date"
-        ].iloc[0]
+    first_date = (
+        pd.Timestamp(
+            equity[
+                "Date"
+            ].iloc[0]
+        )
     )
 
-    last_date = pd.Timestamp(
-        equity[
-            "Date"
-        ].iloc[-1]
+    last_date = (
+        pd.Timestamp(
+            equity[
+                "Date"
+            ].iloc[-1]
+        )
     )
 
     years = (
@@ -2033,19 +1884,23 @@ def calculate_stats(
         drawdown.min()
     )
 
-    winners = trades.loc[
-        trades[
+    winners = (
+        trades.loc[
+            trades[
+                "Net_PnL"
+            ] > 0,
             "Net_PnL"
-        ] > 0,
-        "Net_PnL"
-    ]
+        ]
+    )
 
-    losers = trades.loc[
-        trades[
+    losers = (
+        trades.loc[
+            trades[
+                "Net_PnL"
+            ] < 0,
             "Net_PnL"
-        ] < 0,
-        "Net_PnL"
-    ]
+        ]
+    )
 
     gross_profit = (
         winners.sum()
@@ -2055,7 +1910,7 @@ def calculate_stats(
         losers.sum()
     )
 
-    pf = (
+    profit_factor = (
         gross_profit
         / gross_loss
         if gross_loss > 0
@@ -2081,7 +1936,7 @@ def calculate_stats(
             - STARTING_CAPITAL,
 
         "Return_%":
-            return_pct,
+            total_return,
 
         "CAGR_%":
             cagr,
@@ -2110,7 +1965,7 @@ def calculate_stats(
             ].median(),
 
         "Profit_Factor":
-            pf,
+            profit_factor,
 
         "Max_MTM_DD_%":
             max_dd,
@@ -2133,94 +1988,6 @@ def calculate_stats(
                 "Skipped_Same_Ticker"
             ]
     }
-
-
-# ============================================================
-# SETUP BREAKDOWN
-# ============================================================
-
-def setup_breakdown(
-    trades
-):
-
-    rows = []
-
-    for setup_type, group in (
-        trades.groupby(
-            "Setup_Type"
-        )
-    ):
-
-        winners = group.loc[
-            group[
-                "Net_PnL"
-            ] > 0,
-            "Net_PnL"
-        ]
-
-        losers = group.loc[
-            group[
-                "Net_PnL"
-            ] < 0,
-            "Net_PnL"
-        ]
-
-        gross_profit = (
-            winners.sum()
-        )
-
-        gross_loss = abs(
-            losers.sum()
-        )
-
-        pf = (
-            gross_profit
-            / gross_loss
-            if gross_loss > 0
-            else np.inf
-        )
-
-        rows.append(
-            {
-                "Setup_Type":
-                    setup_type,
-
-                "Trades":
-                    len(
-                        group
-                    ),
-
-                "Net_PnL":
-                    group[
-                        "Net_PnL"
-                    ].sum(),
-
-                "Profitable_%":
-                    (
-                        group[
-                            "Net_PnL"
-                        ] > 0
-                    ).mean()
-                    * 100,
-
-                "Avg_Net_R":
-                    group[
-                        "Net_R"
-                    ].mean(),
-
-                "Profit_Factor":
-                    pf
-            }
-        )
-
-    return (
-        pd.DataFrame(
-            rows
-        )
-        .set_index(
-            "Setup_Type"
-        )
-    )
 
 
 # ============================================================
@@ -2277,6 +2044,43 @@ def yearly_performance(
 
 
 # ============================================================
+# TICKER CONCENTRATION
+# ============================================================
+
+def ticker_breakdown(
+    trades
+):
+
+    result = (
+        trades.groupby(
+            "Ticker"
+        )
+        .agg(
+            Trades=(
+                "Net_PnL",
+                "count"
+            ),
+
+            Net_PnL=(
+                "Net_PnL",
+                "sum"
+            ),
+
+            Avg_R=(
+                "Net_R",
+                "mean"
+            )
+        )
+        .sort_values(
+            "Net_PnL",
+            ascending=False
+        )
+    )
+
+    return result
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -2287,7 +2091,7 @@ def main():
     )
 
     print(
-        "V13 - 1% RISK / 5 POSITIONS / FULL 2.5 ATR TRAIL"
+        "V14 - PULLBACK ONLY / 0.75% RISK / 5 POSITIONS / 2.5 ATR TRAIL"
     )
 
     print(
@@ -2336,15 +2140,23 @@ def main():
     print()
 
     print(
-        "ENTRY TYPES:"
+        "SETUP:"
     )
 
     print(
-        "  BREAKOUT"
+        "  STRONG TREND"
     )
 
     print(
-        "  MOMENTUM PULLBACK + STOCH RSI CROSS > 20"
+        "  EMA20 PULLBACK"
+    )
+
+    print(
+        "  STOCH RSI CROSS > 20"
+    )
+
+    print(
+        "  BULLISH CONFIRMATION"
     )
 
     print()
@@ -2414,15 +2226,18 @@ def main():
             if (
                 ticker
                 in
-                all_data.columns.get_level_values(0)
+                all_data.columns
+                .get_level_values(0)
             ):
 
                 prepared_data[
                     ticker
-                ] = prepare_stock(
-                    all_data[
-                        ticker
-                    ].copy()
+                ] = (
+                    prepare_stock(
+                        all_data[
+                            ticker
+                        ].copy()
+                    )
                 )
 
         except Exception:
@@ -2436,45 +2251,42 @@ def main():
     (
         candidates,
         candidate_diag
-    ) = generate_candidates(
-        all_data,
-        qqq,
-        dxy,
-        backtest_start
+    ) = (
+        generate_candidates(
+            all_data,
+            qqq,
+            dxy,
+            backtest_start
+        )
     )
 
     print()
 
     print(
-        f"Candidates:             "
+        f"Pullback candidates:   "
         f"{len(candidates)}"
     )
 
     print(
-        f"Breakout signals:       "
-        f"{candidate_diag['Breakout_Signals']}"
+        f"Raw pullback signals:  "
+        f"{candidate_diag['Raw_Pullback_Signals']}"
     )
 
     print(
-        f"Pullback signals:       "
-        f"{candidate_diag['Pullback_Signals']}"
-    )
-
-    print(
-        f"Rejected QQQ/DXY:       "
+        f"Rejected QQQ/DXY:      "
         f"{candidate_diag['Rejected_Market']}"
     )
 
     if candidates.empty:
 
         print(
-            "NO CANDIDATES"
+            "NO CANDIDATES."
         )
 
         return
 
     # ========================================================
-    # 2.5 ATR PLANS
+    # EXIT PLANS
     # ========================================================
 
     plans = (
@@ -2492,17 +2304,19 @@ def main():
         trades,
         equity,
         diagnostics
-    ) = simulate_portfolio(
-        plans,
-        all_data,
-        qqq,
-        backtest_start
+    ) = (
+        simulate_portfolio(
+            plans,
+            all_data,
+            qqq,
+            backtest_start
+        )
     )
 
     if trades.empty:
 
         print(
-            "NO EXECUTED TRADES"
+            "NO EXECUTED TRADES."
         )
 
         return
@@ -2526,7 +2340,7 @@ def main():
     )
 
     print(
-        "V13 RESULTS"
+        "V14 RESULTS"
     )
 
     print(
@@ -2608,36 +2422,6 @@ def main():
     )
 
     # ========================================================
-    # SETUP BREAKDOWN
-    # ========================================================
-
-    breakdown = (
-        setup_breakdown(
-            trades
-        )
-    )
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "BREAKOUT VS PULLBACK"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        breakdown
-        .round(3)
-        .to_string()
-    )
-
-    # ========================================================
     # YEAR BY YEAR
     # ========================================================
 
@@ -2663,6 +2447,58 @@ def main():
 
     print(
         yearly
+        .round(3)
+        .to_string()
+    )
+
+    # ========================================================
+    # TICKER CONCENTRATION
+    # ========================================================
+
+    ticker_stats = (
+        ticker_breakdown(
+            trades
+        )
+    )
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "TOP 15 TICKERS BY PNL"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        ticker_stats
+        .head(15)
+        .round(3)
+        .to_string()
+    )
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "BOTTOM 15 TICKERS BY PNL"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        ticker_stats
+        .tail(15)
         .round(3)
         .to_string()
     )
@@ -2726,31 +2562,31 @@ def main():
     # ========================================================
 
     candidates.to_csv(
-        "v13_candidates.csv",
+        "v14_candidates.csv",
         index=False
     )
 
     plans.to_csv(
-        "v13_trade_plans.csv",
+        "v14_trade_plans.csv",
         index=False
     )
 
     trades.to_csv(
-        "v13_trades.csv",
+        "v14_trades.csv",
         index=False
     )
 
     equity.to_csv(
-        "v13_equity.csv",
+        "v14_equity.csv",
         index=False
     )
 
     yearly.to_csv(
-        "v13_yearly.csv"
+        "v14_yearly.csv"
     )
 
-    breakdown.to_csv(
-        "v13_setup_breakdown.csv"
+    ticker_stats.to_csv(
+        "v14_ticker_breakdown.csv"
     )
 
     print()
@@ -2760,7 +2596,7 @@ def main():
     )
 
     print(
-        "V13 completed."
+        "V14 completed."
     )
 
     print(
@@ -2769,4 +2605,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
