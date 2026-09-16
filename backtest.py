@@ -1,27 +1,11 @@
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
 
 
 # ============================================================
-# V12.1 - CORRECTED EXIT TOURNAMENT
-#
-# IMPORTANT:
-# Entry candidates are generated EXACTLY using the V11
-# Fixed-2R lifecycle.
-#
-# Therefore:
-#   Fixed 2R should reproduce V11 closely.
-#
-# Then the SAME candidate list is tested with:
-#
-# A. Fixed 2R
-# B. Full 2.0 ATR Trail
-# C. Full 2.5 ATR Trail
-# D. Full 3.0 ATR Trail
-# E. 50% @ 2R + 50% 2.5 ATR Trail
-#
+# V13 - UNIFIED MOMENTUM
+# 1% RISK / 5 POSITIONS / FULL 2.5 ATR TRAIL
 # ============================================================
 
 
@@ -31,13 +15,13 @@ import numpy as np
 
 STARTING_CAPITAL = 1000.0
 
-RISK_PER_TRADE = 0.005       # 0.50%
+RISK_PER_TRADE = 0.01       # 1.00%
 
-MAX_POSITIONS = 3
+MAX_POSITIONS = 5
 
-SLIPPAGE_PCT = 0.0005        # 0.05%
+SLIPPAGE_PCT = 0.0005       # 0.05%
 
-COMMISSION_PCT = 0.0002      # 0.02%
+COMMISSION_PCT = 0.0002     # 0.02%
 
 MIN_SHARE_SIZE = 0.0001
 
@@ -57,6 +41,8 @@ ENTRY_VALID_DAYS = 3
 FIXED_HOLD_DAYS = 10
 
 TRAIL_HOLD_DAYS = 30
+
+ATR_TRAIL_MULT = 2.5
 
 STOCH_RSI_PERIOD = 14
 
@@ -156,8 +142,7 @@ def calculate_atr(
 ):
 
     previous_close = (
-        df["Close"]
-        .shift(1)
+        df["Close"].shift(1)
     )
 
     tr = pd.concat(
@@ -334,6 +319,7 @@ def get_market_row(
     ]
 
     if available.empty:
+
         return None
 
     row = available.iloc[-1]
@@ -397,7 +383,7 @@ def market_allows_long(
 
 
 # ============================================================
-# COMMON V11 TREND FILTER
+# STRONG TREND
 # ============================================================
 
 def strong_trend(
@@ -442,7 +428,7 @@ def strong_trend(
 
 
 # ============================================================
-# V11 QUALITY SCORE
+# QUALITY SCORE
 # ============================================================
 
 def quality_score(
@@ -534,7 +520,6 @@ def quality_score(
 
 # ============================================================
 # BREAKOUT SETUP
-# EXACT V11 LOGIC
 # ============================================================
 
 def breakout_setup(
@@ -661,7 +646,6 @@ def breakout_setup(
 
 # ============================================================
 # PULLBACK SETUP
-# EXACT V11 LOGIC
 # ============================================================
 
 def pullback_setup(
@@ -857,11 +841,9 @@ def find_entry(
 
 
 # ============================================================
-# EXACT V11 FIXED-2R BASELINE
+# BASELINE FIXED 2R
 #
-# Used BOTH to:
-# 1. define candidate lifecycle
-# 2. act as tournament baseline
+# Used only to preserve the exact V11 candidate lifecycle.
 # ============================================================
 
 def simulate_v11_fixed(
@@ -929,13 +911,7 @@ def simulate_v11_fixed(
                     raw_entry,
 
                 "Exit_Index":
-                    i,
-
-                "Exit_Price":
-                    open_price,
-
-                "Exit_Reason":
-                    "SL_GAP"
+                    i
             }
 
         if low <= stop:
@@ -945,13 +921,7 @@ def simulate_v11_fixed(
                     raw_entry,
 
                 "Exit_Index":
-                    i,
-
-                "Exit_Price":
-                    stop,
-
-                "Exit_Reason":
-                    "SL"
+                    i
             }
 
         if high >= target:
@@ -961,13 +931,7 @@ def simulate_v11_fixed(
                     raw_entry,
 
                 "Exit_Index":
-                    i,
-
-                "Exit_Price":
-                    target,
-
-                "Exit_Reason":
-                    "TP2R"
+                    i
             }
 
     return {
@@ -975,35 +939,15 @@ def simulate_v11_fixed(
             raw_entry,
 
         "Exit_Index":
-            end,
-
-        "Exit_Price":
-            float(
-                df["Close"].iloc[
-                    end
-                ]
-            ),
-
-        "Exit_Reason":
-            "TIME"
+            end
     }
 
 
 # ============================================================
-# GENERATE EXACT V11 CANDIDATE SET
-#
-# IMPORTANT FIX:
-#
-# After a valid trade candidate:
-#
-# i = BASELINE EXIT INDEX + 1
-#
-# not:
-# i = ENTRY INDEX + 1
-#
+# GENERATE V11-EQUIVALENT CANDIDATES
 # ============================================================
 
-def generate_v11_candidates(
+def generate_candidates(
     all_data,
     qqq,
     dxy,
@@ -1015,6 +959,7 @@ def generate_v11_candidates(
     rejected_market = 0
 
     breakout_count = 0
+
     pullback_count = 0
 
     for ticker in TICKERS:
@@ -1091,17 +1036,16 @@ def generate_v11_candidates(
                     )
                 )
 
-                # Same V11 priority:
-                # Breakout wins if both occur.
-
                 if breakout is not None:
 
                     setup = breakout
+
                     breakout_count += 1
 
                 elif pullback is not None:
 
                     setup = pullback
+
                     pullback_count += 1
 
                 else:
@@ -1155,7 +1099,8 @@ def generate_v11_candidates(
                     rejected_market += 1
 
                     i = (
-                        entry_index + 1
+                        entry_index
+                        + 1
                     )
 
                     continue
@@ -1172,6 +1117,7 @@ def generate_v11_candidates(
                 if baseline is None:
 
                     i += 1
+
                     continue
 
                 baseline_exit_index = int(
@@ -1212,33 +1158,11 @@ def generate_v11_candidates(
                                 setup[
                                     "Score"
                                 ]
-                            ),
-
-                        "Baseline_Exit_Index":
-                            baseline_exit_index,
-
-                        "Baseline_Exit_Date":
-                            pd.Timestamp(
-                                df.index[
-                                    baseline_exit_index
-                                ]
-                            ),
-
-                        "Baseline_Exit_Price":
-                            baseline[
-                                "Exit_Price"
-                            ],
-
-                        "Baseline_Exit_Reason":
-                            baseline[
-                                "Exit_Reason"
-                            ]
+                            )
                     }
                 )
 
-                # =================================================
-                # CRITICAL V12.1 FIX
-                # =================================================
+                # preserve exact V11 lifecycle
 
                 i = (
                     baseline_exit_index
@@ -1293,50 +1217,12 @@ def generate_v11_candidates(
 
 
 # ============================================================
-# EXIT PLAN A
-# EXACT FIXED 2R BASELINE
+# FULL 2.5 ATR TRAIL
 # ============================================================
 
-def plan_fixed_2r(
+def create_25atr_plan(
     df,
     trade
-):
-
-    return [
-        {
-            "Index":
-                int(
-                    trade[
-                        "Baseline_Exit_Index"
-                    ]
-                ),
-
-            "Fraction":
-                1.0,
-
-            "Price":
-                float(
-                    trade[
-                        "Baseline_Exit_Price"
-                    ]
-                ),
-
-            "Reason":
-                trade[
-                    "Baseline_Exit_Reason"
-                ]
-        }
-    ]
-
-
-# ============================================================
-# GENERIC FULL ATR TRAIL
-# ============================================================
-
-def plan_full_atr_trail(
-    df,
-    trade,
-    atr_multiple
 ):
 
     entry_index = int(
@@ -1395,12 +1281,11 @@ def plan_full_atr_trail(
             row["ATR14"]
         )
 
-        # Trail based only on previously available
-        # highest close.
+        # Uses prior known highest close
 
         calculated_trail = (
             highest_close
-            - atr_multiple
+            - ATR_TRAIL_MULT
             * atr
         )
 
@@ -1409,403 +1294,62 @@ def plan_full_atr_trail(
             calculated_trail
         )
 
+        # gap below trail
+
         if open_price < trail:
 
-            return [
-                {
-                    "Index":
-                        i,
+            return {
+                "Exit_Index":
+                    i,
 
-                    "Fraction":
-                        1.0,
+                "Raw_Exit":
+                    open_price,
 
-                    "Price":
-                        open_price,
-
-                    "Reason":
-                        f"ATR{atr_multiple}_GAP"
-                }
-            ]
+                "Exit_Reason":
+                    "ATR_GAP"
+            }
 
         if low <= trail:
 
-            return [
-                {
-                    "Index":
-                        i,
+            return {
+                "Exit_Index":
+                    i,
 
-                    "Fraction":
-                        1.0,
+                "Raw_Exit":
+                    trail,
 
-                    "Price":
-                        trail,
-
-                    "Reason":
-                        f"ATR{atr_multiple}_TRAIL"
-                }
-            ]
+                "Exit_Reason":
+                    "ATR_TRAIL"
+            }
 
         highest_close = max(
             highest_close,
             close
         )
 
-    return [
-        {
-            "Index":
-                end,
+    return {
+        "Exit_Index":
+            end,
 
-            "Fraction":
-                1.0,
-
-            "Price":
-                float(
-                    df["Close"].iloc[
-                        end
-                    ]
-                ),
-
-            "Reason":
-                "TIME30"
-        }
-    ]
-
-
-# ============================================================
-# FULL 2 ATR
-# ============================================================
-
-def plan_full_2atr(
-    df,
-    trade
-):
-
-    return plan_full_atr_trail(
-        df,
-        trade,
-        2.0
-    )
-
-
-# ============================================================
-# FULL 2.5 ATR
-# ============================================================
-
-def plan_full_25atr(
-    df,
-    trade
-):
-
-    return plan_full_atr_trail(
-        df,
-        trade,
-        2.5
-    )
-
-
-# ============================================================
-# FULL 3 ATR
-# ============================================================
-
-def plan_full_3atr(
-    df,
-    trade
-):
-
-    return plan_full_atr_trail(
-        df,
-        trade,
-        3.0
-    )
-
-
-# ============================================================
-# 50% @ 2R + 50% 2.5 ATR TRAIL
-# ============================================================
-
-def plan_half_2r_25atr(
-    df,
-    trade
-):
-
-    entry_index = int(
-        trade[
-            "Entry_Index"
-        ]
-    )
-
-    raw_entry = float(
-        trade[
-            "Raw_Entry"
-        ]
-    )
-
-    initial_stop = float(
-        trade[
-            "Initial_Stop"
-        ]
-    )
-
-    risk = (
-        raw_entry
-        - initial_stop
-    )
-
-    tp1 = (
-        raw_entry
-        + 2.0 * risk
-    )
-
-    end = min(
-        entry_index
-        + TRAIL_HOLD_DAYS
-        - 1,
-        len(df) - 1
-    )
-
-    highest_close = (
-        raw_entry
-    )
-
-    tp1_hit = False
-
-    trail = (
-        initial_stop
-    )
-
-    first_event = None
-
-    for i in range(
-        entry_index,
-        end + 1
-    ):
-
-        row = df.iloc[i]
-
-        open_price = float(
-            row["Open"]
-        )
-
-        high = float(
-            row["High"]
-        )
-
-        low = float(
-            row["Low"]
-        )
-
-        close = float(
-            row["Close"]
-        )
-
-        atr = float(
-            row["ATR14"]
-        )
-
-        if not tp1_hit:
-
-            if open_price < initial_stop:
-
-                return [
-                    {
-                        "Index":
-                            i,
-
-                        "Fraction":
-                            1.0,
-
-                        "Price":
-                            open_price,
-
-                        "Reason":
-                            "SL_GAP"
-                    }
+        "Raw_Exit":
+            float(
+                df["Close"].iloc[
+                    end
                 ]
+            ),
 
-            if low <= initial_stop:
-
-                return [
-                    {
-                        "Index":
-                            i,
-
-                        "Fraction":
-                            1.0,
-
-                        "Price":
-                            initial_stop,
-
-                        "Reason":
-                            "SL"
-                    }
-                ]
-
-            if high >= tp1:
-
-                tp1_hit = True
-
-                first_event = {
-                    "Index":
-                        i,
-
-                    "Fraction":
-                        0.5,
-
-                    "Price":
-                        tp1,
-
-                    "Reason":
-                        "TP1_2R"
-                }
-
-                # Once TP1 is hit, runner stop
-                # cannot be below breakeven.
-
-                trail = max(
-                    raw_entry,
-                    highest_close
-                    - 2.5
-                    * atr
-                )
-
-                # Conservative same-day ambiguity.
-                if low <= trail:
-
-                    return [
-                        first_event,
-
-                        {
-                            "Index":
-                                i,
-
-                            "Fraction":
-                                0.5,
-
-                            "Price":
-                                trail,
-
-                            "Reason":
-                                "RUNNER_TRAIL"
-                        }
-                    ]
-
-            highest_close = max(
-                highest_close,
-                close
-            )
-
-        else:
-
-            calculated_trail = (
-                highest_close
-                - 2.5
-                * atr
-            )
-
-            trail = max(
-                trail,
-                raw_entry,
-                calculated_trail
-            )
-
-            if open_price < trail:
-
-                return [
-                    first_event,
-
-                    {
-                        "Index":
-                            i,
-
-                        "Fraction":
-                            0.5,
-
-                        "Price":
-                            open_price,
-
-                        "Reason":
-                            "RUNNER_GAP"
-                    }
-                ]
-
-            if low <= trail:
-
-                return [
-                    first_event,
-
-                    {
-                        "Index":
-                            i,
-
-                        "Fraction":
-                            0.5,
-
-                        "Price":
-                            trail,
-
-                        "Reason":
-                            "RUNNER_TRAIL"
-                    }
-                ]
-
-            highest_close = max(
-                highest_close,
-                close
-            )
-
-    if tp1_hit:
-
-        return [
-            first_event,
-
-            {
-                "Index":
-                    end,
-
-                "Fraction":
-                    0.5,
-
-                "Price":
-                    float(
-                        df["Close"].iloc[
-                            end
-                        ]
-                    ),
-
-                "Reason":
-                    "RUNNER_TIME30"
-            }
-        ]
-
-    return [
-        {
-            "Index":
-                end,
-
-            "Fraction":
-                1.0,
-
-            "Price":
-                float(
-                    df["Close"].iloc[
-                        end
-                    ]
-                ),
-
-            "Reason":
-                "TIME30"
-        }
-    ]
+        "Exit_Reason":
+            "TIME30"
+    }
 
 
 # ============================================================
-# CREATE EXIT PLANS
+# CREATE TRADE PLANS
 # ============================================================
 
-def create_plans(
+def create_trade_plans(
     candidates,
-    prepared_data,
-    exit_function
+    prepared_data
 ):
 
     plans = []
@@ -1814,93 +1358,84 @@ def create_plans(
         candidates.iterrows()
     ):
 
-        ticker = (
-            trade[
-                "Ticker"
-            ]
-        )
+        ticker = trade[
+            "Ticker"
+        ]
+
+        if ticker not in prepared_data:
+
+            continue
 
         df = prepared_data[
             ticker
         ]
 
-        events = (
-            exit_function(
+        result = (
+            create_25atr_plan(
                 df,
                 trade
             )
         )
 
-        if not events:
-
-            continue
-
-        final_index = max(
-            event[
-                "Index"
+        exit_index = int(
+            result[
+                "Exit_Index"
             ]
-            for event in events
         )
-
-        converted_events = []
-
-        for event in events:
-
-            converted_events.append(
-                {
-                    "Date":
-                        pd.Timestamp(
-                            df.index[
-                                event[
-                                    "Index"
-                                ]
-                            ]
-                        ),
-
-                    "Fraction":
-                        float(
-                            event[
-                                "Fraction"
-                            ]
-                        ),
-
-                    "Raw_Price":
-                        float(
-                            event[
-                                "Price"
-                            ]
-                        ),
-
-                    "Reason":
-                        event[
-                            "Reason"
-                        ]
-                }
-            )
 
         plans.append(
             {
                 **trade.to_dict(),
 
-                "Final_Exit_Date":
+                "Exit_Date":
                     pd.Timestamp(
                         df.index[
-                            final_index
+                            exit_index
                         ]
                     ),
 
-                "Exit_Events":
-                    converted_events
+                "Raw_Exit":
+                    float(
+                        result[
+                            "Raw_Exit"
+                        ]
+                    ),
+
+                "Exit_Reason":
+                    result[
+                        "Exit_Reason"
+                    ]
             }
         )
 
-    return pd.DataFrame(
+    result = pd.DataFrame(
         plans
     )
 
+    if not result.empty:
+
+        result = (
+            result
+            .sort_values(
+                [
+                    "Entry_Date",
+                    "Score"
+                ],
+                ascending=[
+                    True,
+                    False
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    return result
+
 
 # ============================================================
-# MTM PRICE
+# CLOSE FOR MTM
 # ============================================================
 
 def get_close(
@@ -1970,19 +1505,24 @@ def simulate_portfolio(
 
     final_date = (
         plans[
-            "Final_Exit_Date"
+            "Exit_Date"
         ].max()
     )
 
-    calendar = qqq.loc[
-        (
-            qqq.index >= backtest_start
-        )
-        &
-        (
-            qqq.index <= final_date
-        )
-    ].index
+    calendar = (
+        qqq.loc[
+            (
+                qqq.index
+                >= backtest_start
+            )
+            &
+            (
+                qqq.index
+                <= final_date
+            )
+        ]
+        .index
+    )
 
     cash = (
         STARTING_CAPITAL
@@ -2004,10 +1544,6 @@ def simulate_portfolio(
 
     skipped_same_ticker = 0
 
-    # ========================================================
-    # DAILY LOOP
-    # ========================================================
-
     for date in calendar:
 
         date = pd.Timestamp(
@@ -2015,9 +1551,7 @@ def simulate_portfolio(
         )
 
         # ====================================================
-        # NEW ENTRIES FIRST
-        #
-        # Same conservative portfolio ordering as V11.
+        # ENTRIES
         # ====================================================
 
         if date in grouped:
@@ -2047,9 +1581,6 @@ def simulate_portfolio(
                     skipped_positions += 1
 
                     continue
-
-                # With longer trailing exits,
-                # reject a second position in same stock.
 
                 already_open = any(
                     p[
@@ -2112,7 +1643,7 @@ def simulate_portfolio(
                     / risk_per_share
                 )
 
-                cost_per_share = (
+                effective_entry_cost = (
                     entry_fill
                     * (
                         1
@@ -2122,7 +1653,7 @@ def simulate_portfolio(
 
                 shares_by_cash = (
                     cash
-                    / cost_per_share
+                    / effective_entry_cost
                 )
 
                 shares = min(
@@ -2138,10 +1669,7 @@ def simulate_portfolio(
                     * MIN_SHARE_SIZE
                 )
 
-                if (
-                    shares
-                    < MIN_SHARE_SIZE
-                ):
+                if shares < MIN_SHARE_SIZE:
 
                     skipped_cash += 1
 
@@ -2184,18 +1712,30 @@ def simulate_portfolio(
                                 "Setup_Type"
                             ],
 
+                        "Signal_Date":
+                            trade[
+                                "Signal_Date"
+                            ],
+
                         "Entry_Date":
                             date,
+
+                        "Exit_Date":
+                            trade[
+                                "Exit_Date"
+                            ],
+
+                        "Exit_Reason":
+                            trade[
+                                "Exit_Reason"
+                            ],
 
                         "Score":
                             trade[
                                 "Score"
                             ],
 
-                        "Original_Shares":
-                            shares,
-
-                        "Remaining_Shares":
+                        "Shares":
                             shares,
 
                         "Entry_Fill":
@@ -2210,206 +1750,125 @@ def simulate_portfolio(
                         "Risk_Per_Share":
                             risk_per_share,
 
-                        "Exit_Events":
+                        "Raw_Exit":
                             trade[
-                                "Exit_Events"
-                            ],
-
-                        "Exit_Proceeds":
-                            0.0,
-
-                        "Exit_Commissions":
-                            0.0,
-
-                        "Exit_Reasons":
-                            []
+                                "Raw_Exit"
+                            ]
                     }
                 )
 
         # ====================================================
-        # EXIT EVENTS
+        # EXITS
         # ====================================================
 
-        remaining_positions = []
+        remaining = []
 
         for position in (
             open_positions
         ):
 
-            todays_events = [
-                event
-                for event
-                in position[
-                    "Exit_Events"
-                ]
-                if (
-                    event[
-                        "Date"
-                    ]
-                    == date
-                )
-            ]
-
-            for event in (
-                todays_events
-            ):
-
-                fraction = float(
-                    event[
-                        "Fraction"
-                    ]
-                )
-
-                shares_to_sell = (
-                    position[
-                        "Original_Shares"
-                    ]
-                    * fraction
-                )
-
-                shares_to_sell = min(
-                    shares_to_sell,
-                    position[
-                        "Remaining_Shares"
-                    ]
-                )
-
-                if shares_to_sell <= 0:
-
-                    continue
-
-                raw_price = float(
-                    event[
-                        "Raw_Price"
-                    ]
-                )
-
-                exit_fill = (
-                    raw_price
-                    * (
-                        1
-                        - SLIPPAGE_PCT
-                    )
-                )
-
-                exit_notional = (
-                    shares_to_sell
-                    * exit_fill
-                )
-
-                exit_commission = (
-                    exit_notional
-                    * COMMISSION_PCT
-                )
-
-                proceeds = (
-                    exit_notional
-                    - exit_commission
-                )
-
-                cash += (
-                    proceeds
-                )
-
-                position[
-                    "Remaining_Shares"
-                ] -= (
-                    shares_to_sell
-                )
-
-                position[
-                    "Exit_Proceeds"
-                ] += (
-                    proceeds
-                )
-
-                position[
-                    "Exit_Commissions"
-                ] += (
-                    exit_commission
-                )
-
-                position[
-                    "Exit_Reasons"
-                ].append(
-                    event[
-                        "Reason"
-                    ]
-                )
-
             if (
                 position[
-                    "Remaining_Shares"
+                    "Exit_Date"
                 ]
-                <= 1e-10
+                != date
             ):
 
-                net_pnl = (
-                    position[
-                        "Exit_Proceeds"
-                    ]
-                    - position[
-                        "Entry_Cost"
-                    ]
-                )
-
-                actual_risk = (
-                    position[
-                        "Original_Shares"
-                    ]
-                    *
-                    position[
-                        "Risk_Per_Share"
-                    ]
-                )
-
-                net_r = (
-                    net_pnl
-                    / actual_risk
-                    if actual_risk > 0
-                    else 0
-                )
-
-                position[
-                    "Net_PnL"
-                ] = (
-                    net_pnl
-                )
-
-                position[
-                    "Net_R"
-                ] = (
-                    net_r
-                )
-
-                position[
-                    "Exit_Date"
-                ] = (
-                    date
-                )
-
-                position[
-                    "Exit_Reason"
-                ] = (
-                    " + ".join(
-                        position[
-                            "Exit_Reasons"
-                        ]
-                    )
-                )
-
-                completed.append(
+                remaining.append(
                     position
                 )
 
-            else:
+                continue
 
-                remaining_positions.append(
-                    position
+            raw_exit = float(
+                position[
+                    "Raw_Exit"
+                ]
+            )
+
+            exit_fill = (
+                raw_exit
+                * (
+                    1
+                    - SLIPPAGE_PCT
                 )
+            )
+
+            exit_notional = (
+                position[
+                    "Shares"
+                ]
+                * exit_fill
+            )
+
+            exit_commission = (
+                exit_notional
+                * COMMISSION_PCT
+            )
+
+            exit_proceeds = (
+                exit_notional
+                - exit_commission
+            )
+
+            cash += (
+                exit_proceeds
+            )
+
+            net_pnl = (
+                exit_proceeds
+                - position[
+                    "Entry_Cost"
+                ]
+            )
+
+            actual_risk = (
+                position[
+                    "Shares"
+                ]
+                *
+                position[
+                    "Risk_Per_Share"
+                ]
+            )
+
+            net_r = (
+                net_pnl
+                / actual_risk
+                if actual_risk > 0
+                else 0
+            )
+
+            position[
+                "Exit_Fill"
+            ] = (
+                exit_fill
+            )
+
+            position[
+                "Exit_Commission"
+            ] = (
+                exit_commission
+            )
+
+            position[
+                "Net_PnL"
+            ] = (
+                net_pnl
+            )
+
+            position[
+                "Net_R"
+            ] = (
+                net_r
+            )
+
+            completed.append(
+                position
+            )
 
         open_positions = (
-            remaining_positions
+            remaining
         )
 
         # ====================================================
@@ -2442,7 +1901,7 @@ def simulate_portfolio(
 
             market_value += (
                 position[
-                    "Remaining_Shares"
+                    "Shares"
                 ]
                 * price
             )
@@ -2508,13 +1967,6 @@ def calculate_stats(
     equity,
     diagnostics
 ):
-
-    if (
-        trades.empty
-        or equity.empty
-    ):
-
-        return None
 
     ending = float(
         equity[
@@ -2616,7 +2068,7 @@ def calculate_stats(
         ].sum()
         +
         trades[
-            "Exit_Commissions"
+            "Exit_Commission"
         ].sum()
     )
 
@@ -2635,7 +2087,9 @@ def calculate_stats(
             cagr,
 
         "Trades":
-            len(trades),
+            len(
+                trades
+            ),
 
         "Profitable_%":
             (
@@ -2669,11 +2123,104 @@ def calculate_stats(
                 "Skipped_Positions"
             ],
 
+        "Skipped_Cash":
+            diagnostics[
+                "Skipped_Cash"
+            ],
+
         "Skipped_Same_Ticker":
             diagnostics[
                 "Skipped_Same_Ticker"
             ]
     }
+
+
+# ============================================================
+# SETUP BREAKDOWN
+# ============================================================
+
+def setup_breakdown(
+    trades
+):
+
+    rows = []
+
+    for setup_type, group in (
+        trades.groupby(
+            "Setup_Type"
+        )
+    ):
+
+        winners = group.loc[
+            group[
+                "Net_PnL"
+            ] > 0,
+            "Net_PnL"
+        ]
+
+        losers = group.loc[
+            group[
+                "Net_PnL"
+            ] < 0,
+            "Net_PnL"
+        ]
+
+        gross_profit = (
+            winners.sum()
+        )
+
+        gross_loss = abs(
+            losers.sum()
+        )
+
+        pf = (
+            gross_profit
+            / gross_loss
+            if gross_loss > 0
+            else np.inf
+        )
+
+        rows.append(
+            {
+                "Setup_Type":
+                    setup_type,
+
+                "Trades":
+                    len(
+                        group
+                    ),
+
+                "Net_PnL":
+                    group[
+                        "Net_PnL"
+                    ].sum(),
+
+                "Profitable_%":
+                    (
+                        group[
+                            "Net_PnL"
+                        ] > 0
+                    ).mean()
+                    * 100,
+
+                "Avg_Net_R":
+                    group[
+                        "Net_R"
+                    ].mean(),
+
+                "Profit_Factor":
+                    pf
+            }
+        )
+
+    return (
+        pd.DataFrame(
+            rows
+        )
+        .set_index(
+            "Setup_Type"
+        )
+    )
 
 
 # ============================================================
@@ -2684,7 +2231,9 @@ def yearly_performance(
     trades
 ):
 
-    df = trades.copy()
+    df = (
+        trades.copy()
+    )
 
     df["Year"] = (
         pd.to_datetime(
@@ -2696,8 +2245,7 @@ def yearly_performance(
     )
 
     return (
-        df
-        .groupby(
+        df.groupby(
             "Year"
         )
         .agg(
@@ -2739,7 +2287,7 @@ def main():
     )
 
     print(
-        "V12.1 - CORRECTED EXIT TOURNAMENT"
+        "V13 - 1% RISK / 5 POSITIONS / FULL 2.5 ATR TRAIL"
     )
 
     print(
@@ -2747,23 +2295,56 @@ def main():
     )
 
     print(
-        f"Capital:              "
+        f"Starting capital:      "
         f"${STARTING_CAPITAL:,.2f}"
     )
 
     print(
-        f"Risk/trade:           "
+        f"Risk per trade:        "
         f"{RISK_PER_TRADE * 100:.2f}%"
     )
 
     print(
-        f"Max positions:        "
+        f"Max positions:         "
         f"{MAX_POSITIONS}"
     )
 
     print(
-        f"Runner max holding:   "
+        f"ATR trail:             "
+        f"{ATR_TRAIL_MULT:.1f} ATR"
+    )
+
+    print(
+        f"Max holding:           "
         f"{TRAIL_HOLD_DAYS} days"
+    )
+
+    print()
+
+    print(
+        "MARKET FILTER:"
+    )
+
+    print(
+        "  QQQ > SMA200"
+    )
+
+    print(
+        "  DXY < SMA200"
+    )
+
+    print()
+
+    print(
+        "ENTRY TYPES:"
+    )
+
+    print(
+        "  BREAKOUT"
+    )
+
+    print(
+        "  MOMENTUM PULLBACK + STOCH RSI CROSS > 20"
     )
 
     print()
@@ -2821,7 +2402,7 @@ def main():
     )
 
     # ========================================================
-    # PREPARE STOCK DATA ONCE
+    # PREPARED DATA
     # ========================================================
 
     prepared_data = {}
@@ -2849,13 +2430,13 @@ def main():
             pass
 
     # ========================================================
-    # EXACT V11 CANDIDATES
+    # CANDIDATES
     # ========================================================
 
     (
         candidates,
         candidate_diag
-    ) = generate_v11_candidates(
+    ) = generate_candidates(
         all_data,
         qqq,
         dxy,
@@ -2865,215 +2446,174 @@ def main():
     print()
 
     print(
-        f"V11-equivalent candidates: "
+        f"Candidates:             "
         f"{len(candidates)}"
     )
 
     print(
-        f"Breakout signals:          "
+        f"Breakout signals:       "
         f"{candidate_diag['Breakout_Signals']}"
     )
 
     print(
-        f"Pullback signals:          "
+        f"Pullback signals:       "
         f"{candidate_diag['Pullback_Signals']}"
     )
 
     print(
-        f"Rejected QQQ/DXY:          "
+        f"Rejected QQQ/DXY:       "
         f"{candidate_diag['Rejected_Market']}"
     )
 
     if candidates.empty:
 
         print(
-            "NO CANDIDATES."
+            "NO CANDIDATES"
         )
 
         return
 
     # ========================================================
-    # TOURNAMENT
+    # 2.5 ATR PLANS
     # ========================================================
 
-    exits = {
-        "Fixed 2R":
-            plan_fixed_2r,
-
-        "Full 2.0 ATR Trail":
-            plan_full_2atr,
-
-        "Full 2.5 ATR Trail":
-            plan_full_25atr,
-
-        "Full 3.0 ATR Trail":
-            plan_full_3atr,
-
-        "50% 2R + 2.5 ATR Trail":
-            plan_half_2r_25atr
-    }
-
-    summary_rows = []
-
-    outputs = {}
-
-    for (
-        exit_name,
-        exit_function
-    ) in exits.items():
-
-        print()
-
-        print(
-            "=" * 120
-        )
-
-        print(
-            exit_name.upper()
-        )
-
-        print(
-            "=" * 120
-        )
-
-        plans = create_plans(
+    plans = (
+        create_trade_plans(
             candidates,
-            prepared_data,
-            exit_function
+            prepared_data
         )
-
-        (
-            trades,
-            equity,
-            portfolio_diag
-        ) = simulate_portfolio(
-            plans,
-            all_data,
-            qqq,
-            backtest_start
-        )
-
-        stats = calculate_stats(
-            trades,
-            equity,
-            portfolio_diag
-        )
-
-        if stats is None:
-
-            continue
-
-        stats[
-            "Exit_Strategy"
-        ] = (
-            exit_name
-        )
-
-        summary_rows.append(
-            stats
-        )
-
-        yearly = (
-            yearly_performance(
-                trades
-            )
-        )
-
-        outputs[
-            exit_name
-        ] = {
-            "trades":
-                trades,
-
-            "equity":
-                equity,
-
-            "yearly":
-                yearly
-        }
-
-        print(
-            f"Ending capital:        "
-            f"${stats['Ending_Capital']:,.2f}"
-        )
-
-        print(
-            f"Net profit:            "
-            f"${stats['Net_Profit']:,.2f}"
-        )
-
-        print(
-            f"Return:                "
-            f"{stats['Return_%']:.2f}%"
-        )
-
-        print(
-            f"CAGR:                  "
-            f"{stats['CAGR_%']:.2f}%"
-        )
-
-        print(
-            f"Trades:                "
-            f"{stats['Trades']}"
-        )
-
-        print(
-            f"Profitable:            "
-            f"{stats['Profitable_%']:.2f}%"
-        )
-
-        print(
-            f"Avg Net R:             "
-            f"{stats['Avg_Net_R']:.3f}R"
-        )
-
-        print(
-            f"Median R:              "
-            f"{stats['Median_R']:.3f}R"
-        )
-
-        print(
-            f"Profit Factor:         "
-            f"{stats['Profit_Factor']:.3f}"
-        )
-
-        print(
-            f"TRUE MTM DD:           "
-            f"{stats['Max_MTM_DD_%']:.2f}%"
-        )
-
-        print(
-            f"Skipped positions:     "
-            f"{stats['Skipped_Positions']}"
-        )
-
-        print(
-            f"Skipped same ticker:   "
-            f"{stats['Skipped_Same_Ticker']}"
-        )
-
-        print()
-
-        print(
-            "YEAR-BY-YEAR"
-        )
-
-        print(
-            yearly
-            .round(3)
-            .to_string()
-        )
+    )
 
     # ========================================================
-    # FINAL COMPARISON
+    # PORTFOLIO
     # ========================================================
 
-    summary = (
-        pd.DataFrame(
-            summary_rows
+    (
+        trades,
+        equity,
+        diagnostics
+    ) = simulate_portfolio(
+        plans,
+        all_data,
+        qqq,
+        backtest_start
+    )
+
+    if trades.empty:
+
+        print(
+            "NO EXECUTED TRADES"
         )
-        .set_index(
-            "Exit_Strategy"
+
+        return
+
+    stats = (
+        calculate_stats(
+            trades,
+            equity,
+            diagnostics
+        )
+    )
+
+    # ========================================================
+    # RESULTS
+    # ========================================================
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "V13 RESULTS"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        f"Ending capital:        "
+        f"${stats['Ending_Capital']:,.2f}"
+    )
+
+    print(
+        f"Net profit:            "
+        f"${stats['Net_Profit']:,.2f}"
+    )
+
+    print(
+        f"Return:                "
+        f"{stats['Return_%']:.2f}%"
+    )
+
+    print(
+        f"CAGR:                  "
+        f"{stats['CAGR_%']:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Trades:                "
+        f"{stats['Trades']}"
+    )
+
+    print(
+        f"Profitable:            "
+        f"{stats['Profitable_%']:.2f}%"
+    )
+
+    print(
+        f"Avg Net R:             "
+        f"{stats['Avg_Net_R']:.3f}R"
+    )
+
+    print(
+        f"Median R:              "
+        f"{stats['Median_R']:.3f}R"
+    )
+
+    print(
+        f"Profit Factor:         "
+        f"{stats['Profit_Factor']:.3f}"
+    )
+
+    print(
+        f"TRUE MTM Drawdown:     "
+        f"{stats['Max_MTM_DD_%']:.2f}%"
+    )
+
+    print(
+        f"Commissions:           "
+        f"${stats['Commissions']:.2f}"
+    )
+
+    print()
+
+    print(
+        f"Skipped max positions: "
+        f"{stats['Skipped_Positions']}"
+    )
+
+    print(
+        f"Skipped cash:          "
+        f"{stats['Skipped_Cash']}"
+    )
+
+    print(
+        f"Skipped same ticker:   "
+        f"{stats['Skipped_Same_Ticker']}"
+    )
+
+    # ========================================================
+    # SETUP BREAKDOWN
+    # ========================================================
+
+    breakdown = (
+        setup_breakdown(
+            trades
         )
     )
 
@@ -3084,41 +2624,29 @@ def main():
     )
 
     print(
-        "V12.1 FINAL EXIT COMPARISON"
+        "BREAKOUT VS PULLBACK"
     )
 
     print(
         "=" * 120
     )
 
-    columns = [
-        "Ending_Capital",
-        "Net_Profit",
-        "Return_%",
-        "CAGR_%",
-        "Trades",
-        "Profitable_%",
-        "Avg_Net_R",
-        "Median_R",
-        "Profit_Factor",
-        "Max_MTM_DD_%",
-        "Commissions",
-        "Skipped_Positions",
-        "Skipped_Same_Ticker"
-    ]
-
     print(
-        summary[
-            columns
-        ]
+        breakdown
         .round(3)
         .to_string()
     )
 
     # ========================================================
-    # BASELINE VALIDATION
+    # YEAR BY YEAR
     # ========================================================
 
+    yearly = (
+        yearly_performance(
+            trades
+        )
+    )
+
     print()
 
     print(
@@ -3126,68 +2654,44 @@ def main():
     )
 
     print(
-        "BASELINE VALIDATION"
+        "YEAR-BY-YEAR"
     )
 
     print(
         "=" * 120
     )
 
-    baseline = (
-        summary.loc[
-            "Fixed 2R"
-        ]
-    )
-
     print(
-        "Expected approximately from V11:"
-    )
-
-    print(
-        "Trades ~150"
-    )
-
-    print(
-        "Avg Net R ~0.104R"
-    )
-
-    print(
-        "Profit Factor ~1.315"
-    )
-
-    print(
-        "CAGR ~1.52%"
-    )
-
-    print()
-
-    print(
-        "Current Fixed-2R baseline:"
-    )
-
-    print(
-        f"Trades:        "
-        f"{baseline['Trades']:.0f}"
-    )
-
-    print(
-        f"Avg Net R:     "
-        f"{baseline['Avg_Net_R']:.3f}R"
-    )
-
-    print(
-        f"Profit Factor: "
-        f"{baseline['Profit_Factor']:.3f}"
-    )
-
-    print(
-        f"CAGR:          "
-        f"{baseline['CAGR_%']:.2f}%"
+        yearly
+        .round(3)
+        .to_string()
     )
 
     # ========================================================
     # TARGET CHECK
     # ========================================================
+
+    checks = {
+        "CAGR >= 10%":
+            stats[
+                "CAGR_%"
+            ] >= 10,
+
+        "PF >= 1.25":
+            stats[
+                "Profit_Factor"
+            ] >= 1.25,
+
+        "Avg R >= 0.10":
+            stats[
+                "Avg_Net_R"
+            ] >= 0.10,
+
+        "Max DD <= 15%":
+            stats[
+                "Max_MTM_DD_%"
+            ] >= -15
+    }
 
     print()
 
@@ -3203,110 +2707,51 @@ def main():
         "=" * 120
     )
 
-    for exit_name, row in (
-        summary.iterrows()
+    for name, passed in (
+        checks.items()
     ):
 
-        checks = {
-            "CAGR >= 10%":
-                row[
-                    "CAGR_%"
-                ] >= 10,
-
-            "PF >= 1.25":
-                row[
-                    "Profit_Factor"
-                ] >= 1.25,
-
-            "Avg R >= 0.10":
-                row[
-                    "Avg_Net_R"
-                ] >= 0.10,
-
-            "Max DD <= 15%":
-                row[
-                    "Max_MTM_DD_%"
-                ] >= -15
-        }
-
-        print()
-
         print(
-            exit_name
+            f"{name:<22} "
+            f"{'PASS' if passed else 'FAIL'}"
         )
 
-        for name, passed in (
-            checks.items()
-        ):
-
-            print(
-                f"  {name:<20} "
-                f"{'PASS' if passed else 'FAIL'}"
-            )
-
-        print(
-            f"  Score: "
-            f"{sum(checks.values())}/4"
-        )
+    print(
+        f"\nScore: "
+        f"{sum(checks.values())}/4"
+    )
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    summary.to_csv(
-        "v12_1_exit_comparison.csv"
-    )
-
     candidates.to_csv(
-        "v12_1_v11_candidates.csv",
+        "v13_candidates.csv",
         index=False
     )
 
-    for (
-        exit_name,
-        output
-    ) in outputs.items():
+    plans.to_csv(
+        "v13_trade_plans.csv",
+        index=False
+    )
 
-        safe_name = (
-            exit_name
-            .lower()
-            .replace(
-                "%",
-                "pct"
-            )
-            .replace(
-                "+",
-                "plus"
-            )
-            .replace(
-                ".",
-                "_"
-            )
-            .replace(
-                " ",
-                "_"
-            )
-        )
+    trades.to_csv(
+        "v13_trades.csv",
+        index=False
+    )
 
-        output[
-            "trades"
-        ].to_csv(
-            f"v12_1_{safe_name}_trades.csv",
-            index=False
-        )
+    equity.to_csv(
+        "v13_equity.csv",
+        index=False
+    )
 
-        output[
-            "equity"
-        ].to_csv(
-            f"v12_1_{safe_name}_equity.csv",
-            index=False
-        )
+    yearly.to_csv(
+        "v13_yearly.csv"
+    )
 
-        output[
-            "yearly"
-        ].to_csv(
-            f"v12_1_{safe_name}_yearly.csv"
-        )
+    breakdown.to_csv(
+        "v13_setup_breakdown.csv"
+    )
 
     print()
 
@@ -3315,7 +2760,7 @@ def main():
     )
 
     print(
-        "V12.1 completed."
+        "V13 completed."
     )
 
     print(
