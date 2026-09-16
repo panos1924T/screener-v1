@@ -1,18 +1,11 @@
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
 
 
 # ============================================================
-# V15 - V14 EXACT STRATEGY / LONG HISTORY TEST
-#
-# SAME STRATEGY AS V14
-#
-# ONLY CHANGE:
-#   - Download maximum history
-#   - Test last 15 years
-#
+# V16 - V15 PULLBACK STRATEGY
+# 15-YEAR HISTORY / 10 MAX POSITIONS
 # ============================================================
 
 
@@ -24,7 +17,7 @@ STARTING_CAPITAL = 1000.0
 
 RISK_PER_TRADE = 0.0075      # 0.75%
 
-MAX_POSITIONS = 5
+MAX_POSITIONS = 10
 
 SLIPPAGE_PCT = 0.0005
 
@@ -84,15 +77,8 @@ def calculate_rsi(series, period=14):
 
     delta = series.diff()
 
-    gain = delta.where(
-        delta > 0,
-        0.0
-    )
-
-    loss = -delta.where(
-        delta < 0,
-        0.0
-    )
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
 
     avg_gain = gain.ewm(
         alpha=1 / period,
@@ -106,24 +92,13 @@ def calculate_rsi(series, period=14):
 
     rs = avg_gain / avg_loss
 
-    return 100 - (
-        100 / (1 + rs)
-    )
+    return 100 - (100 / (1 + rs))
 
 
 def calculate_stoch_rsi(rsi, period=14):
 
-    lowest = (
-        rsi
-        .rolling(period)
-        .min()
-    )
-
-    highest = (
-        rsi
-        .rolling(period)
-        .max()
-    )
+    lowest = rsi.rolling(period).min()
+    highest = rsi.rolling(period).max()
 
     denominator = (
         highest - lowest
@@ -133,9 +108,7 @@ def calculate_stoch_rsi(rsi, period=14):
     )
 
     return (
-        (
-            rsi - lowest
-        )
+        (rsi - lowest)
         / denominator
     ) * 100
 
@@ -143,23 +116,14 @@ def calculate_stoch_rsi(rsi, period=14):
 def calculate_atr(df, period=14):
 
     previous_close = (
-        df["Close"]
-        .shift(1)
+        df["Close"].shift(1)
     )
 
     tr = pd.concat(
         [
             df["High"] - df["Low"],
-
-            (
-                df["High"]
-                - previous_close
-            ).abs(),
-
-            (
-                df["Low"]
-                - previous_close
-            ).abs()
+            (df["High"] - previous_close).abs(),
+            (df["Low"] - previous_close).abs()
         ],
         axis=1
     ).max(axis=1)
@@ -189,45 +153,27 @@ def prepare_stock(df):
         inplace=True
     )
 
-    df["SMA200"] = (
+    df["SMA200"] = df["Close"].rolling(200).mean()
+
+    df["SMA50"] = df["Close"].rolling(50).mean()
+
+    df["EMA20"] = df["Close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df["ATR14"] = calculate_atr(
+        df,
+        ATR_PERIOD
+    )
+
+    df["RSI14"] = calculate_rsi(
         df["Close"]
-        .rolling(200)
-        .mean()
     )
 
-    df["SMA50"] = (
-        df["Close"]
-        .rolling(50)
-        .mean()
-    )
-
-    df["EMA20"] = (
-        df["Close"]
-        .ewm(
-            span=20,
-            adjust=False
-        )
-        .mean()
-    )
-
-    df["ATR14"] = (
-        calculate_atr(
-            df,
-            ATR_PERIOD
-        )
-    )
-
-    df["RSI14"] = (
-        calculate_rsi(
-            df["Close"]
-        )
-    )
-
-    df["STOCH_RSI"] = (
-        calculate_stoch_rsi(
-            df["RSI14"],
-            STOCH_RSI_PERIOD
-        )
+    df["STOCH_RSI"] = calculate_stoch_rsi(
+        df["RSI14"],
+        STOCH_RSI_PERIOD
     )
 
     df["AVG_VOL20"] = (
@@ -252,9 +198,7 @@ def prepare_stock(df):
 
 def download_market(ticker, name):
 
-    print(
-        f"Downloading {name}..."
-    )
+    print(f"Downloading {name}...")
 
     df = yf.download(
         ticker,
@@ -271,19 +215,14 @@ def download_market(ticker, name):
             f"No data for {name}"
         )
 
-    if isinstance(
-        df.columns,
-        pd.MultiIndex
-    ):
+    if isinstance(df.columns, pd.MultiIndex):
 
         df.columns = (
             df.columns
             .get_level_values(0)
         )
 
-    df.dropna(
-        inplace=True
-    )
+    df.dropna(inplace=True)
 
     df["SMA200"] = (
         df["Close"]
@@ -304,13 +243,9 @@ def get_market_row(df, date):
 
         return None
 
-    row = (
-        available.iloc[-1]
-    )
+    row = available.iloc[-1]
 
-    if pd.isna(
-        row["SMA200"]
-    ):
+    if pd.isna(row["SMA200"]):
 
         return None
 
@@ -333,37 +268,23 @@ def market_allows_long(
         date
     )
 
-    if (
-        qqq_row is None
-        or dxy_row is None
-    ):
+    if qqq_row is None or dxy_row is None:
 
         return False
 
     qqq_ok = (
-        float(
-            qqq_row["Close"]
-        )
+        float(qqq_row["Close"])
         >
-        float(
-            qqq_row["SMA200"]
-        )
+        float(qqq_row["SMA200"])
     )
 
     dxy_ok = (
-        float(
-            dxy_row["Close"]
-        )
+        float(dxy_row["Close"])
         <
-        float(
-            dxy_row["SMA200"]
-        )
+        float(dxy_row["SMA200"])
     )
 
-    return (
-        qqq_ok
-        and dxy_ok
-    )
+    return qqq_ok and dxy_ok
 
 
 # ============================================================
@@ -372,29 +293,15 @@ def market_allows_long(
 
 def strong_trend(df, i):
 
-    row = (
-        df.iloc[i]
-    )
+    row = df.iloc[i]
 
-    close = float(
-        row["Close"]
-    )
-
-    sma200 = float(
-        row["SMA200"]
-    )
-
-    sma50 = float(
-        row["SMA50"]
-    )
-
-    ema20 = float(
-        row["EMA20"]
-    )
+    close = float(row["Close"])
+    sma200 = float(row["SMA200"])
+    sma50 = float(row["SMA50"])
+    ema20 = float(row["EMA20"])
 
     old_sma50 = float(
-        df["SMA50"]
-        .iloc[
+        df["SMA50"].iloc[
             i - 10
         ]
     )
@@ -416,57 +323,31 @@ def strong_trend(df, i):
 
 def quality_score(df, i):
 
-    row = (
-        df.iloc[i]
-    )
+    row = df.iloc[i]
 
-    close = float(
-        row["Close"]
-    )
+    close = float(row["Close"])
+    high = float(row["High"])
+    low = float(row["Low"])
 
-    high = float(
-        row["High"]
-    )
+    sma50 = float(row["SMA50"])
+    ema20 = float(row["EMA20"])
+    atr = float(row["ATR14"])
 
-    low = float(
-        row["Low"]
-    )
-
-    sma50 = float(
-        row["SMA50"]
-    )
-
-    ema20 = float(
-        row["EMA20"]
-    )
-
-    atr = float(
-        row["ATR14"]
-    )
-
-    volume = float(
-        row["Volume"]
-    )
-
-    avg_volume = float(
-        row["AVG_VOL20"]
-    )
+    volume = float(row["Volume"])
+    avg_volume = float(row["AVG_VOL20"])
 
     old_sma50 = float(
-        df["SMA50"]
-        .iloc[
+        df["SMA50"].iloc[
             i - 10
         ]
     )
 
     slope = (
-        sma50
-        - old_sma50
+        sma50 - old_sma50
     ) / atr
 
     ema_strength = (
-        ema20
-        - sma50
+        ema20 - sma50
     ) / atr
 
     candle_range = (
@@ -474,9 +355,7 @@ def quality_score(df, i):
     )
 
     close_location = (
-        (
-            close - low
-        )
+        (close - low)
         / candle_range
         if candle_range > 0
         else 0
@@ -502,7 +381,7 @@ def quality_score(df, i):
 
 
 # ============================================================
-# PULLBACK ONLY
+# PULLBACK SETUP
 # ============================================================
 
 def pullback_setup(df, i):
@@ -514,64 +393,34 @@ def pullback_setup(df, i):
 
         return None
 
-    row = (
-        df.iloc[i]
-    )
+    row = df.iloc[i]
 
-    close = float(
-        row["Close"]
-    )
+    close = float(row["Close"])
+    open_price = float(row["Open"])
+    high = float(row["High"])
+    low = float(row["Low"])
 
-    open_price = float(
-        row["Open"]
-    )
+    ema20 = float(row["EMA20"])
+    atr = float(row["ATR14"])
+    rsi = float(row["RSI14"])
 
-    high = float(
-        row["High"]
-    )
+    volume = float(row["Volume"])
+    avg_volume = float(row["AVG_VOL20"])
 
-    low = float(
-        row["Low"]
-    )
+    low5 = float(row["LOW5"])
 
-    ema20 = float(
-        row["EMA20"]
-    )
-
-    atr = float(
-        row["ATR14"]
-    )
-
-    rsi = float(
-        row["RSI14"]
-    )
-
-    volume = float(
-        row["Volume"]
-    )
-
-    avg_volume = float(
-        row["AVG_VOL20"]
-    )
-
-    low5 = float(
-        row["LOW5"]
-    )
-
-    stoch = float(
-        row["STOCH_RSI"]
-    )
+    stoch = float(row["STOCH_RSI"])
 
     previous_stoch = float(
-        df["STOCH_RSI"]
-        .iloc[
+        df["STOCH_RSI"].iloc[
             i - 1
         ]
     )
 
     if (
         pd.isna(stoch)
-        or pd.isna(previous_stoch)
+        or
+        pd.isna(previous_stoch)
     ):
 
         return None
@@ -714,8 +563,7 @@ def find_entry(
     ):
 
         if float(
-            df["High"]
-            .iloc[i]
+            df["High"].iloc[i]
         ) >= trigger:
 
             return i
@@ -735,8 +583,7 @@ def simulate_baseline_lifecycle(
 ):
 
     entry_open = float(
-        df["Open"]
-        .iloc[
+        df["Open"].iloc[
             entry_index
         ]
     )
@@ -771,9 +618,7 @@ def simulate_baseline_lifecycle(
         end + 1
     ):
 
-        row = (
-            df.iloc[i]
-        )
+        row = df.iloc[i]
 
         open_price = float(
             row["Open"]
@@ -894,8 +739,7 @@ def generate_candidates(
 
                 if any(
                     pd.isna(
-                        df[col]
-                        .iloc[i]
+                        df[col].iloc[i]
                     )
                     for col
                     in required
@@ -1037,10 +881,8 @@ def generate_candidates(
                 f"{type(e).__name__}: {e}"
             )
 
-    result = (
-        pd.DataFrame(
-            candidates
-        )
+    result = pd.DataFrame(
+        candidates
     )
 
     if not result.empty:
@@ -1110,22 +952,16 @@ def create_25atr_plan(
         len(df) - 1
     )
 
-    trail = (
-        initial_stop
-    )
+    trail = initial_stop
 
-    highest_close = (
-        raw_entry
-    )
+    highest_close = raw_entry
 
     for i in range(
         entry_index,
         end + 1
     ):
 
-        row = (
-            df.iloc[i]
-        )
+        row = df.iloc[i]
 
         open_price = float(
             row["Open"]
@@ -1191,8 +1027,7 @@ def create_25atr_plan(
 
         "Raw_Exit":
             float(
-                df["Close"]
-                .iloc[
+                df["Close"].iloc[
                     end
                 ]
             ),
@@ -1227,11 +1062,9 @@ def create_trade_plans(
 
             continue
 
-        df = (
-            prepared_data[
-                ticker
-            ]
-        )
+        df = prepared_data[
+            ticker
+        ]
 
         exit_result = (
             create_25atr_plan(
@@ -1271,10 +1104,8 @@ def create_trade_plans(
             }
         )
 
-    return (
-        pd.DataFrame(
-            plans
-        )
+    return pd.DataFrame(
+        plans
     )
 
 
@@ -1290,11 +1121,9 @@ def get_close(
 
     try:
 
-        df = (
-            all_data[
-                ticker
-            ]
-        )
+        df = all_data[
+            ticker
+        ]
 
         available = (
             df.loc[
@@ -1358,24 +1187,18 @@ def simulate_portfolio(
     calendar = (
         qqq.loc[
             (
-                qqq.index
-                >= backtest_start
+                qqq.index >= backtest_start
             )
             &
             (
-                qqq.index
-                <= final_date
+                qqq.index <= final_date
             )
         ].index
     )
 
-    cash = (
-        STARTING_CAPITAL
-    )
+    cash = STARTING_CAPITAL
 
-    last_equity = (
-        STARTING_CAPITAL
-    )
+    last_equity = STARTING_CAPITAL
 
     open_positions = []
 
@@ -1389,13 +1212,13 @@ def simulate_portfolio(
 
     skipped_same_ticker = 0
 
+
     for date in calendar:
 
-        date = (
-            pd.Timestamp(
-                date
-            )
+        date = pd.Timestamp(
+            date
         )
+
 
         # ====================================================
         # ENTRIES
@@ -1403,11 +1226,9 @@ def simulate_portfolio(
 
         if date in grouped:
 
-            todays = (
-                grouped[
-                    date
-                ]
-            )
+            todays = grouped[
+                date
+            ]
 
             risk_budget = (
                 last_equity
@@ -1543,9 +1364,7 @@ def simulate_portfolio(
 
                     continue
 
-                cash -= (
-                    entry_cost
-                )
+                cash -= entry_cost
 
                 open_positions.append(
                     {
@@ -1602,6 +1421,7 @@ def simulate_portfolio(
                     }
                 )
 
+
         # ====================================================
         # EXITS
         # ====================================================
@@ -1654,9 +1474,7 @@ def simulate_portfolio(
                 - exit_commission
             )
 
-            cash += (
-                exit_proceeds
-            )
+            cash += exit_proceeds
 
             net_pnl = (
                 exit_proceeds
@@ -1684,35 +1502,26 @@ def simulate_portfolio(
 
             position[
                 "Exit_Fill"
-            ] = (
-                exit_fill
-            )
+            ] = exit_fill
 
             position[
                 "Exit_Commission"
-            ] = (
-                exit_commission
-            )
+            ] = exit_commission
 
             position[
                 "Net_PnL"
-            ] = (
-                net_pnl
-            )
+            ] = net_pnl
 
             position[
                 "Net_R"
-            ] = (
-                net_r
-            )
+            ] = net_r
 
             completed.append(
                 position
             )
 
-        open_positions = (
-            remaining
-        )
+        open_positions = remaining
+
 
         # ====================================================
         # MARK TO MARKET
@@ -1724,14 +1533,12 @@ def simulate_portfolio(
             open_positions
         ):
 
-            price = (
-                get_close(
-                    all_data,
-                    position[
-                        "Ticker"
-                    ],
-                    date
-                )
+            price = get_close(
+                all_data,
+                position[
+                    "Ticker"
+                ],
+                date
             )
 
             if price is None:
@@ -1754,9 +1561,7 @@ def simulate_portfolio(
             + market_value
         )
 
-        last_equity = (
-            equity
-        )
+        last_equity = equity
 
         equity_rows.append(
             {
@@ -1778,6 +1583,7 @@ def simulate_portfolio(
                     )
             }
         )
+
 
     return (
         pd.DataFrame(
@@ -1825,20 +1631,16 @@ def calculate_stats(
         - 1
     ) * 100
 
-    first_date = (
-        pd.Timestamp(
-            equity[
-                "Date"
-            ].iloc[0]
-        )
+    first_date = pd.Timestamp(
+        equity[
+            "Date"
+        ].iloc[0]
     )
 
-    last_date = (
-        pd.Timestamp(
-            equity[
-                "Date"
-            ].iloc[-1]
-        )
+    last_date = pd.Timestamp(
+        equity[
+            "Date"
+        ].iloc[-1]
     )
 
     years = (
@@ -1860,15 +1662,11 @@ def calculate_stats(
         - 1
     ) * 100
 
-    curve = (
-        equity[
-            "Equity"
-        ]
-    )
+    curve = equity[
+        "Equity"
+    ]
 
-    peak = (
-        curve.cummax()
-    )
+    peak = curve.cummax()
 
     drawdown = (
         curve
@@ -1880,23 +1678,19 @@ def calculate_stats(
         drawdown.min()
     )
 
-    winners = (
-        trades.loc[
-            trades[
-                "Net_PnL"
-            ] > 0,
+    winners = trades.loc[
+        trades[
             "Net_PnL"
-        ]
-    )
+        ] > 0,
+        "Net_PnL"
+    ]
 
-    losers = (
-        trades.loc[
-            trades[
-                "Net_PnL"
-            ] < 0,
+    losers = trades.loc[
+        trades[
             "Net_PnL"
-        ]
-    )
+        ] < 0,
+        "Net_PnL"
+    ]
 
     gross_profit = (
         winners.sum()
@@ -1994,9 +1788,7 @@ def yearly_performance(
     trades
 ):
 
-    df = (
-        trades.copy()
-    )
+    df = trades.copy()
 
     df["Year"] = (
         pd.to_datetime(
@@ -2040,41 +1832,6 @@ def yearly_performance(
 
 
 # ============================================================
-# TICKER BREAKDOWN
-# ============================================================
-
-def ticker_breakdown(
-    trades
-):
-
-    return (
-        trades.groupby(
-            "Ticker"
-        )
-        .agg(
-            Trades=(
-                "Net_PnL",
-                "count"
-            ),
-
-            Net_PnL=(
-                "Net_PnL",
-                "sum"
-            ),
-
-            Avg_R=(
-                "Net_R",
-                "mean"
-            )
-        )
-        .sort_values(
-            "Net_PnL",
-            ascending=False
-        )
-    )
-
-
-# ============================================================
 # PERIOD BREAKDOWN
 # ============================================================
 
@@ -2086,27 +1843,50 @@ def period_breakdown(
 
     df["Year"] = (
         pd.to_datetime(
-            df["Exit_Date"]
-        ).dt.year
+            df[
+                "Exit_Date"
+            ]
+        )
+        .dt.year
     )
+
+    periods = [
+        (
+            "2011-2015",
+            2011,
+            2015
+        ),
+
+        (
+            "2016-2020",
+            2016,
+            2020
+        ),
+
+        (
+            "2021-2026",
+            2021,
+            2026
+        )
+    ]
 
     rows = []
 
-    periods = [
-        ("2011-2015", 2011, 2015),
-        ("2016-2020", 2016, 2020),
-        ("2021-2026", 2021, 2026)
-    ]
-
-    for name, start, end in periods:
+    for (
+        name,
+        start,
+        end
+    ) in periods:
 
         group = df[
             (
-                df["Year"] >= start
+                df["Year"]
+                >= start
             )
             &
             (
-                df["Year"] <= end
+                df["Year"]
+                <= end
             )
         ]
 
@@ -2115,16 +1895,22 @@ def period_breakdown(
             continue
 
         winners = group.loc[
-            group["Net_PnL"] > 0,
+            group[
+                "Net_PnL"
+            ] > 0,
             "Net_PnL"
         ]
 
         losers = group.loc[
-            group["Net_PnL"] < 0,
+            group[
+                "Net_PnL"
+            ] < 0,
             "Net_PnL"
         ]
 
-        gp = winners.sum()
+        gp = (
+            winners.sum()
+        )
 
         gl = abs(
             losers.sum()
@@ -2142,7 +1928,9 @@ def period_breakdown(
                     name,
 
                 "Trades":
-                    len(group),
+                    len(
+                        group
+                    ),
 
                 "Net_PnL":
                     group[
@@ -2167,10 +1955,6 @@ def period_breakdown(
             }
         )
 
-    if not rows:
-
-        return pd.DataFrame()
-
     return (
         pd.DataFrame(
             rows
@@ -2192,7 +1976,7 @@ def main():
     )
 
     print(
-        "V15 - V14 PULLBACK STRATEGY / 15-YEAR HISTORY TEST"
+        "V16 - PULLBACK / 15 YEARS / 0.75% RISK / 10 MAX POSITIONS"
     )
 
     print(
@@ -2224,18 +2008,18 @@ def main():
         f"{TRAIL_HOLD_DAYS} days"
     )
 
+    print()
+
     print(
-        f"Requested history:     "
-        f"{BACKTEST_YEARS} years"
+        "ONLY CHANGE FROM V15:"
+    )
+
+    print(
+        "  MAX_POSITIONS 5 -> 10"
     )
 
     print()
 
-    print(
-        "NO STRATEGY PARAMETERS CHANGED FROM V14."
-    )
-
-    print()
 
     # ========================================================
     # DOWNLOAD
@@ -2283,22 +2067,14 @@ def main():
         )
     )
 
-    earliest_qqq = (
+    backtest_start = max(
+        requested_start,
         pd.Timestamp(
             qqq.index.min()
-        )
-    )
-
-    earliest_dxy = (
+        ),
         pd.Timestamp(
             dxy.index.min()
         )
-    )
-
-    backtest_start = max(
-        requested_start,
-        earliest_qqq,
-        earliest_dxy
     )
 
     print(
@@ -2306,6 +2082,7 @@ def main():
         f"{backtest_start.date()} "
         f"-> {end_date.date()}"
     )
+
 
     # ========================================================
     # PREPARED DATA
@@ -2326,17 +2103,16 @@ def main():
 
                 prepared_data[
                     ticker
-                ] = (
-                    prepare_stock(
-                        all_data[
-                            ticker
-                        ].copy()
-                    )
+                ] = prepare_stock(
+                    all_data[
+                        ticker
+                    ].copy()
                 )
 
         except Exception:
 
             pass
+
 
     # ========================================================
     # CANDIDATES
@@ -2369,22 +2145,20 @@ def main():
         f"{candidate_diag['Rejected_Market']}"
     )
 
-    if candidates.empty:
-
-        print(
-            "NO CANDIDATES."
-        )
-
-        return
 
     # ========================================================
-    # PLANS / PORTFOLIO
+    # PLANS
     # ========================================================
 
     plans = create_trade_plans(
         candidates,
         prepared_data
     )
+
+
+    # ========================================================
+    # PORTFOLIO
+    # ========================================================
 
     (
         trades,
@@ -2397,19 +2171,12 @@ def main():
         backtest_start
     )
 
-    if trades.empty:
-
-        print(
-            "NO EXECUTED TRADES."
-        )
-
-        return
-
     stats = calculate_stats(
         trades,
         equity,
         diagnostics
     )
+
 
     # ========================================================
     # RESULTS
@@ -2422,7 +2189,7 @@ def main():
     )
 
     print(
-        "V15 LONG-HISTORY RESULTS"
+        "V16 RESULTS"
     )
 
     print(
@@ -2503,6 +2270,7 @@ def main():
         f"{stats['Skipped_Same_Ticker']}"
     )
 
+
     # ========================================================
     # YEARLY
     # ========================================================
@@ -2531,6 +2299,7 @@ def main():
         .to_string()
     )
 
+
     # ========================================================
     # PERIODS
     # ========================================================
@@ -2553,72 +2322,15 @@ def main():
         "=" * 120
     )
 
-    if periods.empty:
-
-        print(
-            "No period data."
-        )
-
-    else:
-
-        print(
-            periods
-            .round(3)
-            .to_string()
-        )
-
-    # ========================================================
-    # TICKERS
-    # ========================================================
-
-    ticker_stats = ticker_breakdown(
-        trades
-    )
-
-    print()
-
     print(
-        "=" * 120
-    )
-
-    print(
-        "TOP 15 TICKERS"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        ticker_stats
-        .head(15)
+        periods
         .round(3)
         .to_string()
     )
 
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "BOTTOM 15 TICKERS"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        ticker_stats
-        .tail(15)
-        .round(3)
-        .to_string()
-    )
 
     # ========================================================
-    # TARGET CHECK
+    # TARGET
     # ========================================================
 
     checks = {
@@ -2671,35 +2383,32 @@ def main():
         f"{sum(checks.values())}/4"
     )
 
+
     # ========================================================
     # SAVE
     # ========================================================
 
     candidates.to_csv(
-        "v15_candidates.csv",
+        "v16_candidates.csv",
         index=False
     )
 
     trades.to_csv(
-        "v15_trades.csv",
+        "v16_trades.csv",
         index=False
     )
 
     equity.to_csv(
-        "v15_equity.csv",
+        "v16_equity.csv",
         index=False
     )
 
     yearly.to_csv(
-        "v15_yearly.csv"
-    )
-
-    ticker_stats.to_csv(
-        "v15_ticker_breakdown.csv"
+        "v16_yearly.csv"
     )
 
     periods.to_csv(
-        "v15_period_breakdown.csv"
+        "v16_period_breakdown.csv"
     )
 
     print()
@@ -2709,7 +2418,7 @@ def main():
     )
 
     print(
-        "V15 completed."
+        "V16 completed."
     )
 
     print(
@@ -2718,6 +2427,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
-
