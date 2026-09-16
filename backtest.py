@@ -1,11 +1,18 @@
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
 
 
 # ============================================================
-# V14 - PULLBACK ONLY
-# 0.75% RISK / 5 POSITIONS / FULL 2.5 ATR TRAIL
+# V15 - V14 EXACT STRATEGY / LONG HISTORY TEST
+#
+# SAME STRATEGY AS V14
+#
+# ONLY CHANGE:
+#   - Download maximum history
+#   - Test last 15 years
+#
 # ============================================================
 
 
@@ -30,9 +37,9 @@ MIN_SHARE_SIZE = 0.0001
 # HISTORY / STRATEGY
 # ============================================================
 
-DOWNLOAD_PERIOD = "7y"
+DOWNLOAD_PERIOD = "max"
 
-BACKTEST_YEARS = 5
+BACKTEST_YEARS = 15
 
 ATR_PERIOD = 14
 
@@ -298,8 +305,7 @@ def get_market_row(df, date):
         return None
 
     row = (
-        available
-        .iloc[-1]
+        available.iloc[-1]
     )
 
     if pd.isna(
@@ -565,21 +571,16 @@ def pullback_setup(df, i):
 
     if (
         pd.isna(stoch)
-        or
-        pd.isna(previous_stoch)
+        or pd.isna(previous_stoch)
     ):
 
         return None
-
-    # Momentum stock after pullback
 
     if not (
         45 <= rsi <= 65
     ):
 
         return None
-
-    # Stoch RSI bullish cross above 20
 
     crossed = (
         previous_stoch
@@ -593,8 +594,6 @@ def pullback_setup(df, i):
 
         return None
 
-    # Pullback close to EMA20
-
     ema_distance = (
         abs(
             low - ema20
@@ -606,13 +605,9 @@ def pullback_setup(df, i):
 
         return None
 
-    # Reclaim / hold EMA20
-
     if close <= ema20:
 
         return None
-
-    # Bullish candle
 
     if close <= open_price:
 
@@ -730,8 +725,6 @@ def find_entry(
 
 # ============================================================
 # BASELINE LIFECYCLE
-#
-# This keeps candidate generation comparable with V11/V13.
 # ============================================================
 
 def simulate_baseline_lifecycle(
@@ -834,7 +827,7 @@ def simulate_baseline_lifecycle(
 
 
 # ============================================================
-# GENERATE PULLBACK CANDIDATES
+# GENERATE CANDIDATES
 # ============================================================
 
 def generate_candidates(
@@ -989,6 +982,7 @@ def generate_candidates(
                 if baseline is None:
 
                     i += 1
+
                     continue
 
                 baseline_exit_index = int(
@@ -1285,7 +1279,7 @@ def create_trade_plans(
 
 
 # ============================================================
-# MTM CLOSE
+# GET CLOSE
 # ============================================================
 
 def get_close(
@@ -1364,11 +1358,13 @@ def simulate_portfolio(
     calendar = (
         qqq.loc[
             (
-                qqq.index >= backtest_start
+                qqq.index
+                >= backtest_start
             )
             &
             (
-                qqq.index <= final_date
+                qqq.index
+                <= final_date
             )
         ].index
     )
@@ -2044,14 +2040,14 @@ def yearly_performance(
 
 
 # ============================================================
-# TICKER CONCENTRATION
+# TICKER BREAKDOWN
 # ============================================================
 
 def ticker_breakdown(
     trades
 ):
 
-    result = (
+    return (
         trades.groupby(
             "Ticker"
         )
@@ -2077,7 +2073,112 @@ def ticker_breakdown(
         )
     )
 
-    return result
+
+# ============================================================
+# PERIOD BREAKDOWN
+# ============================================================
+
+def period_breakdown(
+    trades
+):
+
+    df = trades.copy()
+
+    df["Year"] = (
+        pd.to_datetime(
+            df["Exit_Date"]
+        ).dt.year
+    )
+
+    rows = []
+
+    periods = [
+        ("2011-2015", 2011, 2015),
+        ("2016-2020", 2016, 2020),
+        ("2021-2026", 2021, 2026)
+    ]
+
+    for name, start, end in periods:
+
+        group = df[
+            (
+                df["Year"] >= start
+            )
+            &
+            (
+                df["Year"] <= end
+            )
+        ]
+
+        if group.empty:
+
+            continue
+
+        winners = group.loc[
+            group["Net_PnL"] > 0,
+            "Net_PnL"
+        ]
+
+        losers = group.loc[
+            group["Net_PnL"] < 0,
+            "Net_PnL"
+        ]
+
+        gp = winners.sum()
+
+        gl = abs(
+            losers.sum()
+        )
+
+        pf = (
+            gp / gl
+            if gl > 0
+            else np.inf
+        )
+
+        rows.append(
+            {
+                "Period":
+                    name,
+
+                "Trades":
+                    len(group),
+
+                "Net_PnL":
+                    group[
+                        "Net_PnL"
+                    ].sum(),
+
+                "Avg_R":
+                    group[
+                        "Net_R"
+                    ].mean(),
+
+                "Profit_Factor":
+                    pf,
+
+                "Profitable_%":
+                    (
+                        group[
+                            "Net_PnL"
+                        ] > 0
+                    ).mean()
+                    * 100
+            }
+        )
+
+    if not rows:
+
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame(
+            rows
+        )
+        .set_index(
+            "Period"
+        )
+    )
 
 
 # ============================================================
@@ -2091,7 +2192,7 @@ def main():
     )
 
     print(
-        "V14 - PULLBACK ONLY / 0.75% RISK / 5 POSITIONS / 2.5 ATR TRAIL"
+        "V15 - V14 PULLBACK STRATEGY / 15-YEAR HISTORY TEST"
     )
 
     print(
@@ -2123,40 +2224,15 @@ def main():
         f"{TRAIL_HOLD_DAYS} days"
     )
 
-    print()
-
     print(
-        "MARKET FILTER:"
-    )
-
-    print(
-        "  QQQ > SMA200"
-    )
-
-    print(
-        "  DXY < SMA200"
+        f"Requested history:     "
+        f"{BACKTEST_YEARS} years"
     )
 
     print()
 
     print(
-        "SETUP:"
-    )
-
-    print(
-        "  STRONG TREND"
-    )
-
-    print(
-        "  EMA20 PULLBACK"
-    )
-
-    print(
-        "  STOCH RSI CROSS > 20"
-    )
-
-    print(
-        "  BULLISH CONFIRMATION"
+        "NO STRATEGY PARAMETERS CHANGED FROM V14."
     )
 
     print()
@@ -2200,15 +2276,33 @@ def main():
         )
     )
 
-    backtest_start = (
+    requested_start = (
         end_date
         - pd.DateOffset(
             years=BACKTEST_YEARS
         )
     )
 
+    earliest_qqq = (
+        pd.Timestamp(
+            qqq.index.min()
+        )
+    )
+
+    earliest_dxy = (
+        pd.Timestamp(
+            dxy.index.min()
+        )
+    )
+
+    backtest_start = max(
+        requested_start,
+        earliest_qqq,
+        earliest_dxy
+    )
+
     print(
-        f"Backtest: "
+        f"Actual backtest: "
         f"{backtest_start.date()} "
         f"-> {end_date.date()}"
     )
@@ -2251,13 +2345,11 @@ def main():
     (
         candidates,
         candidate_diag
-    ) = (
-        generate_candidates(
-            all_data,
-            qqq,
-            dxy,
-            backtest_start
-        )
+    ) = generate_candidates(
+        all_data,
+        qqq,
+        dxy,
+        backtest_start
     )
 
     print()
@@ -2286,31 +2378,23 @@ def main():
         return
 
     # ========================================================
-    # EXIT PLANS
+    # PLANS / PORTFOLIO
     # ========================================================
 
-    plans = (
-        create_trade_plans(
-            candidates,
-            prepared_data
-        )
+    plans = create_trade_plans(
+        candidates,
+        prepared_data
     )
-
-    # ========================================================
-    # PORTFOLIO
-    # ========================================================
 
     (
         trades,
         equity,
         diagnostics
-    ) = (
-        simulate_portfolio(
-            plans,
-            all_data,
-            qqq,
-            backtest_start
-        )
+    ) = simulate_portfolio(
+        plans,
+        all_data,
+        qqq,
+        backtest_start
     )
 
     if trades.empty:
@@ -2321,12 +2405,10 @@ def main():
 
         return
 
-    stats = (
-        calculate_stats(
-            trades,
-            equity,
-            diagnostics
-        )
+    stats = calculate_stats(
+        trades,
+        equity,
+        diagnostics
     )
 
     # ========================================================
@@ -2340,7 +2422,7 @@ def main():
     )
 
     print(
-        "V14 RESULTS"
+        "V15 LONG-HISTORY RESULTS"
     )
 
     print(
@@ -2422,13 +2504,11 @@ def main():
     )
 
     # ========================================================
-    # YEAR BY YEAR
+    # YEARLY
     # ========================================================
 
-    yearly = (
-        yearly_performance(
-            trades
-        )
+    yearly = yearly_performance(
+        trades
     )
 
     print()
@@ -2452,13 +2532,11 @@ def main():
     )
 
     # ========================================================
-    # TICKER CONCENTRATION
+    # PERIODS
     # ========================================================
 
-    ticker_stats = (
-        ticker_breakdown(
-            trades
-        )
+    periods = period_breakdown(
+        trades
     )
 
     print()
@@ -2468,7 +2546,43 @@ def main():
     )
 
     print(
-        "TOP 15 TICKERS BY PNL"
+        "MULTI-YEAR PERIOD BREAKDOWN"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    if periods.empty:
+
+        print(
+            "No period data."
+        )
+
+    else:
+
+        print(
+            periods
+            .round(3)
+            .to_string()
+        )
+
+    # ========================================================
+    # TICKERS
+    # ========================================================
+
+    ticker_stats = ticker_breakdown(
+        trades
+    )
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "TOP 15 TICKERS"
     )
 
     print(
@@ -2489,7 +2603,7 @@ def main():
     )
 
     print(
-        "BOTTOM 15 TICKERS BY PNL"
+        "BOTTOM 15 TICKERS"
     )
 
     print(
@@ -2562,31 +2676,30 @@ def main():
     # ========================================================
 
     candidates.to_csv(
-        "v14_candidates.csv",
-        index=False
-    )
-
-    plans.to_csv(
-        "v14_trade_plans.csv",
+        "v15_candidates.csv",
         index=False
     )
 
     trades.to_csv(
-        "v14_trades.csv",
+        "v15_trades.csv",
         index=False
     )
 
     equity.to_csv(
-        "v14_equity.csv",
+        "v15_equity.csv",
         index=False
     )
 
     yearly.to_csv(
-        "v14_yearly.csv"
+        "v15_yearly.csv"
     )
 
     ticker_stats.to_csv(
-        "v14_ticker_breakdown.csv"
+        "v15_ticker_breakdown.csv"
+    )
+
+    periods.to_csv(
+        "v15_period_breakdown.csv"
     )
 
     print()
@@ -2596,7 +2709,7 @@ def main():
     )
 
     print(
-        "V14 completed."
+        "V15 completed."
     )
 
     print(
@@ -2607,3 +2720,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
