@@ -1,42 +1,33 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 
 
 # ============================================================
-# V24 - ALL SIGNALS / PURE STRATEGY EDGE TEST
+# V25 - UNIVERSE EXPANSION TEST
 #
-# PURPOSE:
-# Evaluate EVERY valid signal independently.
+# A) NASDAQ-100 + QQQ regime
+# B) S&P 500    + QQQ regime
+# C) S&P 500    + SPY regime
 #
-# NO:
-# - max positions
-# - cash constraint
-# - portfolio ranking
-# - position sizing
-# - skipped signals because another trade is open
+# DXY < SMA200 remains ON in all variants.
 #
-# IMPORTANT:
-# CAGR is intentionally NOT calculated.
+# SAME SIGNAL ENGINE AS V24:
+# - Stoch OFF
+# - RSI OFF
+# - Relative Volume >= 0.80
+# - EMA20 pullback
+# - 2.5 ATR trail
+# - max 30 bars
 #
-# We measure the edge of the signal engine itself:
-# - Avg Net R
-# - Profit Factor in R
-# - Win rate
-# - Median R
-# - Trades/year
-# - Year-by-year consistency
-# - Period consistency
-# - R drawdown
-# - holding period
+# PURE STRATEGY TEST:
+# NO portfolio position limit
+# NO capital limit
+# NO ranking
+# NO CAGR
 #
-# CURRENT LOCKED STRATEGY:
-# QQQ > SMA200
-# DXY < SMA200
-# RSI OFF
-# Stoch RSI OFF
-# Relative Volume >= 0.80
-# 2.5 ATR trailing exit
+# Each valid stock/day signal is evaluated independently.
 # ============================================================
 
 
@@ -44,7 +35,6 @@ import numpy as np
 # SETTINGS
 # ============================================================
 
-DOWNLOAD_PERIOD = "max"
 BACKTEST_YEARS = 15
 
 ATR_PERIOD = 14
@@ -59,12 +49,14 @@ REL_VOLUME_MIN = 0.80
 SLIPPAGE_PCT = 0.0005
 COMMISSION_PCT = 0.0002
 
+BATCH_SIZE = 40
+
 
 # ============================================================
-# NASDAQ-100
+# CURRENT NASDAQ-100 LIST
 # ============================================================
 
-TICKERS = [
+NASDAQ_TICKERS = [
     "ADBE", "AMD", "ABNB", "ALNY", "GOOGL", "GOOG", "AMZN", "AEP", "AMGN",
     "ADI", "AAPL", "AMAT", "APP", "ARM", "ASML", "ADSK", "ADP", "AXON",
     "BKR", "BKNG", "AVGO", "CDNS", "CHTR", "CTAS", "CSCO", "CCEP", "CTSH",
@@ -81,14 +73,53 @@ TICKERS = [
 
 
 # ============================================================
-# INDICATORS
+# S&P 500 CONSTITUENTS
+# ============================================================
+
+def get_sp500_constituents():
+
+    url = (
+        "https://en.wikipedia.org/wiki/"
+        "List_of_S%26P_500_companies"
+    )
+
+    print("Downloading current S&P 500 constituent list...")
+
+    tables = pd.read_html(url)
+
+    table = tables[0].copy()
+
+    table["Yahoo_Ticker"] = (
+        table["Symbol"]
+        .str.replace(".", "-", regex=False)
+    )
+
+    sector_map = dict(
+        zip(
+            table["Yahoo_Ticker"],
+            table["GICS Sector"]
+        )
+    )
+
+    tickers = (
+        table["Yahoo_Ticker"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    return tickers, sector_map
+
+
+# ============================================================
+# ATR
 # ============================================================
 
 def calculate_atr(df, period=14):
 
     previous_close = df["Close"].shift(1)
 
-    true_range = pd.concat(
+    tr = pd.concat(
         [
             df["High"] - df["Low"],
             (df["High"] - previous_close).abs(),
@@ -97,7 +128,7 @@ def calculate_atr(df, period=14):
         axis=1
     ).max(axis=1)
 
-    return true_range.ewm(
+    return tr.ewm(
         alpha=1 / period,
         adjust=False
     ).mean()
@@ -111,14 +142,16 @@ def prepare_stock(df):
 
     df = df.copy()
 
+    required_prices = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+    ]
+
     df.dropna(
-        subset=[
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
-        ],
+        subset=required_prices,
         inplace=True
     )
 
@@ -165,7 +198,7 @@ def prepare_stock(df):
 
 
 # ============================================================
-# MARKET DATA
+# MARKET DOWNLOAD
 # ============================================================
 
 def download_market(ticker, name):
@@ -174,16 +207,17 @@ def download_market(ticker, name):
 
     df = yf.download(
         ticker,
-        period=DOWNLOAD_PERIOD,
+        period="max",
         interval="1d",
-        progress=False,
         auto_adjust=True,
-        repair=True
+        repair=True,
+        progress=False,
+        threads=False
     )
 
     if df.empty:
         raise RuntimeError(
-            f"No data for {name}"
+            f"No data downloaded for {name}"
         )
 
     if isinstance(
@@ -208,6 +242,173 @@ def download_market(ticker, name):
     return df
 
 
+# ============================================================
+# ROBUST STOCK DOWNLOAD
+# ============================================================
+
+def download_stocks(tickers):
+
+    all_stock_data = {}
+
+    total = len(tickers)
+
+    for start in range(
+        0,
+        total,
+        BATCH_SIZE
+    ):
+
+        batch = tickers[
+            start:
+            start + BATCH_SIZE
+        ]
+
+        print(
+            f"Downloading stocks "
+            f"{start + 1}-{min(start + BATCH_SIZE, total)} "
+            f"of {total}..."
+        )
+
+        try:
+
+            data = yf.download(
+                batch,
+                period="max",
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=True,
+                repair=True,
+                progress=False,
+                threads=False
+            )
+
+        except Exception as e:
+
+            print(
+                f"Batch failed: {e}"
+            )
+
+            continue
+
+
+        # ====================================================
+        # MULTI-TICKER BATCH
+        # ====================================================
+
+        if isinstance(
+            data.columns,
+            pd.MultiIndex
+        ):
+
+            available = set(
+                data.columns
+                .get_level_values(0)
+            )
+
+            for ticker in batch:
+
+                if ticker not in available:
+                    continue
+
+                try:
+
+                    df = (
+                        data[ticker]
+                        .copy()
+                    )
+
+                    if not df.empty:
+
+                        all_stock_data[
+                            ticker
+                        ] = df
+
+                except Exception:
+                    pass
+
+
+        # ====================================================
+        # SINGLE TICKER EDGE CASE
+        # ====================================================
+
+        elif len(batch) == 1:
+
+            ticker = batch[0]
+
+            if not data.empty:
+
+                all_stock_data[
+                    ticker
+                ] = data.copy()
+
+
+        time.sleep(0.2)
+
+
+    missing = [
+        ticker
+        for ticker in tickers
+        if ticker not in all_stock_data
+    ]
+
+
+    # ========================================================
+    # RETRY MISSING INDIVIDUALLY
+    # ========================================================
+
+    if missing:
+
+        print()
+
+        print(
+            f"Retrying {len(missing)} missing tickers..."
+        )
+
+
+    for ticker in missing:
+
+        try:
+
+            df = yf.download(
+                ticker,
+                period="max",
+                interval="1d",
+                auto_adjust=True,
+                repair=True,
+                progress=False,
+                threads=False
+            )
+
+            if isinstance(
+                df.columns,
+                pd.MultiIndex
+            ):
+
+                df.columns = (
+                    df.columns
+                    .get_level_values(0)
+                )
+
+            if not df.empty:
+
+                all_stock_data[
+                    ticker
+                ] = df
+
+        except Exception as e:
+
+            print(
+                f"FAILED {ticker}: {e}"
+            )
+
+
+    return all_stock_data
+
+
+# ============================================================
+# MARKET FUNCTIONS
+# ============================================================
+
 def get_market_row(df, date):
 
     available = df[
@@ -227,50 +428,61 @@ def get_market_row(df, date):
     return row
 
 
+def above_sma200(df, date):
+
+    row = get_market_row(
+        df,
+        date
+    )
+
+    if row is None:
+        return False
+
+    return (
+        float(row["Close"])
+        >
+        float(row["SMA200"])
+    )
+
+
+def below_sma200(df, date):
+
+    row = get_market_row(
+        df,
+        date
+    )
+
+    if row is None:
+        return False
+
+    return (
+        float(row["Close"])
+        <
+        float(row["SMA200"])
+    )
+
+
 def market_allows_long(
-    qqq,
+    primary_market,
     dxy,
     date
 ):
 
-    qqq_row = get_market_row(
-        qqq,
-        date
-    )
-
-    dxy_row = get_market_row(
-        dxy,
-        date
-    )
-
-    if (
-        qqq_row is None
-        or
-        dxy_row is None
-    ):
-        return False
-
     return (
-        float(
-            qqq_row["Close"]
-        )
-        >
-        float(
-            qqq_row["SMA200"]
+        above_sma200(
+            primary_market,
+            date
         )
         and
-        float(
-            dxy_row["Close"]
-        )
-        <
-        float(
-            dxy_row["SMA200"]
+        below_sma200(
+            dxy,
+            date
         )
     )
 
 
 # ============================================================
-# TREND
+# STRONG TREND
 # ============================================================
 
 def strong_trend(df, i):
@@ -280,36 +492,32 @@ def strong_trend(df, i):
 
     row = df.iloc[i]
 
-    close = float(
-        row["Close"]
-    )
-
-    sma200 = float(
-        row["SMA200"]
-    )
-
-    sma50 = float(
-        row["SMA50"]
-    )
-
-    ema20 = float(
-        row["EMA20"]
-    )
-
-    old_sma50 = float(
-        df["SMA50"].iloc[
-            i - 10
-        ]
-    )
-
     return (
-        close > sma200
+        float(row["Close"])
+        >
+        float(row["SMA200"])
+
         and
-        sma50 > sma200
+
+        float(row["SMA50"])
+        >
+        float(row["SMA200"])
+
         and
-        ema20 > sma50
+
+        float(row["EMA20"])
+        >
+        float(row["SMA50"])
+
         and
-        sma50 > old_sma50
+
+        float(row["SMA50"])
+        >
+        float(
+            df["SMA50"].iloc[
+                i - 10
+            ]
+        )
     )
 
 
@@ -324,6 +532,7 @@ def pullback_setup(df, i):
         i
     ):
         return None
+
 
     row = df.iloc[i]
 
@@ -431,7 +640,7 @@ def pullback_setup(df, i):
 
 
     # ========================================================
-    # ENTRY / STOP
+    # ENTRY + STOP
     # ========================================================
 
     trigger = (
@@ -455,12 +664,10 @@ def pullback_setup(df, i):
     if risk <= 0:
         return None
 
-
     if risk < (
         0.50 * atr
     ):
         return None
-
 
     if risk > (
         3.0 * atr
@@ -474,9 +681,6 @@ def pullback_setup(df, i):
 
         "Stop":
             stop,
-
-        "ATR":
-            atr,
 
         "EMA_Distance_ATR":
             ema_distance,
@@ -505,7 +709,6 @@ def find_entry(
         len(df) - 1
     )
 
-
     for i in range(
         signal_index + 1,
         end + 1
@@ -517,15 +720,11 @@ def find_entry(
 
             return i
 
-
     return None
 
 
 # ============================================================
-# EXIT
-#
-# 2.5 ATR trailing stop
-# max 30 trading bars
+# TRADE SIMULATION
 # ============================================================
 
 def simulate_trade(
@@ -541,14 +740,12 @@ def simulate_trade(
         ]
     )
 
-
     raw_entry = max(
         trigger,
         entry_open
     )
 
 
-    # Execution-adjusted values
     entry_fill = (
         raw_entry
         * (
@@ -556,7 +753,6 @@ def simulate_trade(
             + SLIPPAGE_PCT
         )
     )
-
 
     stop_reference = (
         initial_stop
@@ -566,12 +762,10 @@ def simulate_trade(
         )
     )
 
-
     risk_per_share = (
         entry_fill
         - stop_reference
     )
-
 
     if risk_per_share <= 0:
         return None
@@ -586,7 +780,6 @@ def simulate_trade(
 
 
     trail = initial_stop
-
     highest_close = raw_entry
 
 
@@ -596,7 +789,6 @@ def simulate_trade(
     ):
 
         row = df.iloc[i]
-
 
         open_price = float(
             row["Open"]
@@ -615,14 +807,12 @@ def simulate_trade(
         )
 
 
-        # Trail is based only on information
-        # available before today's close.
         calculated_trail = (
             highest_close
-            - ATR_TRAIL_MULT
+            -
+            ATR_TRAIL_MULT
             * atr
         )
-
 
         trail = max(
             trail,
@@ -630,36 +820,22 @@ def simulate_trade(
         )
 
 
-        # ====================================================
-        # GAP THROUGH STOP
-        # ====================================================
-
+        # GAP
         if open_price < trail:
 
             raw_exit = open_price
-
-            exit_reason = (
-                "ATR_GAP"
-            )
-
             exit_index = i
+            exit_reason = "ATR_GAP"
 
             break
 
 
-        # ====================================================
-        # INTRADAY STOP
-        # ====================================================
-
+        # STOP
         if low <= trail:
 
             raw_exit = trail
-
-            exit_reason = (
-                "ATR_TRAIL"
-            )
-
             exit_index = i
+            exit_reason = "ATR_TRAIL"
 
             break
 
@@ -669,24 +845,19 @@ def simulate_trade(
             close
         )
 
+
     else:
 
         exit_index = end
 
         raw_exit = float(
             df["Close"].iloc[
-                end
+                exit_index
             ]
         )
 
-        exit_reason = (
-            "TIME30"
-        )
+        exit_reason = "TIME30"
 
-
-    # ========================================================
-    # COSTS
-    # ========================================================
 
     exit_fill = (
         raw_exit
@@ -704,7 +875,6 @@ def simulate_trade(
             + COMMISSION_PCT
         )
     )
-
 
     exit_proceeds_per_share = (
         exit_fill
@@ -727,41 +897,13 @@ def simulate_trade(
     )
 
 
-    holding_bars = (
-        exit_index
-        - entry_index
-        + 1
-    )
-
-
-    holding_calendar_days = (
-        pd.Timestamp(
-            df.index[
-                exit_index
-            ]
-        )
-        -
-        pd.Timestamp(
-            df.index[
-                entry_index
-            ]
-        )
-    ).days
-
-
     return {
-        "Entry_Index":
-            entry_index,
-
         "Entry_Date":
             pd.Timestamp(
                 df.index[
                     entry_index
                 ]
             ),
-
-        "Exit_Index":
-            exit_index,
 
         "Exit_Date":
             pd.Timestamp(
@@ -770,285 +912,275 @@ def simulate_trade(
                 ]
             ),
 
-        "Raw_Entry":
-            raw_entry,
-
-        "Entry_Fill":
-            entry_fill,
-
-        "Initial_Stop":
-            initial_stop,
-
-        "Raw_Exit":
-            raw_exit,
-
-        "Exit_Fill":
-            exit_fill,
+        "Net_R":
+            net_r,
 
         "Exit_Reason":
             exit_reason,
 
-        "Risk_Per_Share":
-            risk_per_share,
-
-        "Net_R":
-            net_r,
-
         "Holding_Bars":
-            holding_bars,
-
-        "Holding_Days":
-            holding_calendar_days
+            (
+                exit_index
+                - entry_index
+                + 1
+            )
     }
 
 
 # ============================================================
-# GENERATE EVERY SIGNAL
-#
-# IMPORTANT:
-#
-# No:
-#   i = exit_index + 1
-#
-# Every stock/day can generate a new independent signal.
-#
+# GENERATE ALL SIGNALS
 # ============================================================
 
 def generate_all_trades(
-    all_data,
-    qqq,
+    universe_name,
+    tickers,
+    prepared_data,
+    primary_market,
     dxy,
+    qqq,
     backtest_start,
-    end_date
+    end_date,
+    sector_map
 ):
 
     trades = []
 
+    diagnostics = {
+        "Stocks":
+            0,
 
-    diagnostic = {
-        "Stock_Days_Checked": 0,
-        "Raw_Setups": 0,
-        "No_Trigger": 0,
-        "Market_Rejected": 0,
-        "Trades": 0
+        "Stock_Days":
+            0,
+
+        "Raw_Setups":
+            0,
+
+        "No_Trigger":
+            0,
+
+        "Market_Rejected":
+            0,
+
+        "Trades":
+            0
     }
 
 
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        f"GENERATING {universe_name}"
+    )
+
+    print(
+        "=" * 120
+    )
+
+
     for number, ticker in enumerate(
-        TICKERS,
+        tickers,
         start=1
     ):
 
-        print(
-            f"[{number:03d}/{len(TICKERS)}] "
-            f"{ticker}"
-        )
+        if ticker not in prepared_data:
+            continue
 
 
-        try:
+        df = prepared_data[
+            ticker
+        ]
 
-            if (
-                ticker
-                not in
-                all_data.columns
-                .get_level_values(0)
-            ):
 
-                print(
-                    "   Missing download"
-                )
+        if len(df) < 250:
+            continue
 
-                continue
 
+        diagnostics[
+            "Stocks"
+        ] += 1
 
-            df = prepare_stock(
-                all_data[
-                    ticker
-                ].copy()
-            )
 
-
-            if len(df) < 250:
-
-                continue
-
-
-            for i in range(
-                210,
-                len(df) - ENTRY_VALID_DAYS - 1
-            ):
-
-                signal_date = pd.Timestamp(
-                    df.index[i]
-                )
-
-
-                if (
-                    signal_date
-                    < backtest_start
-                ):
-
-                    continue
-
-
-                if (
-                    signal_date
-                    > end_date
-                ):
-
-                    break
-
-
-                required = [
-                    "SMA200",
-                    "SMA50",
-                    "EMA20",
-                    "ATR14",
-                    "AVG_VOL20",
-                    "LOW5"
-                ]
-
-
-                if any(
-                    pd.isna(
-                        df[col].iloc[i]
-                    )
-                    for col in required
-                ):
-
-                    continue
-
-
-                diagnostic[
-                    "Stock_Days_Checked"
-                ] += 1
-
-
-                setup = pullback_setup(
-                    df,
-                    i
-                )
-
-
-                if setup is None:
-
-                    continue
-
-
-                diagnostic[
-                    "Raw_Setups"
-                ] += 1
-
-
-                trigger = float(
-                    setup[
-                        "Trigger"
-                    ]
-                )
-
-                stop = float(
-                    setup[
-                        "Stop"
-                    ]
-                )
-
-
-                entry_index = find_entry(
-                    df,
-                    i,
-                    trigger
-                )
-
-
-                if entry_index is None:
-
-                    diagnostic[
-                        "No_Trigger"
-                    ] += 1
-
-                    continue
-
-
-                entry_date = pd.Timestamp(
-                    df.index[
-                        entry_index
-                    ]
-                )
-
-
-                if (
-                    entry_date
-                    > end_date
-                ):
-
-                    continue
-
-
-                if not market_allows_long(
-                    qqq,
-                    dxy,
-                    entry_date
-                ):
-
-                    diagnostic[
-                        "Market_Rejected"
-                    ] += 1
-
-                    continue
-
-
-                result = simulate_trade(
-                    df,
-                    entry_index,
-                    trigger,
-                    stop
-                )
-
-
-                if result is None:
-
-                    continue
-
-
-                trades.append(
-                    {
-                        "Ticker":
-                            ticker,
-
-                        "Signal_Date":
-                            signal_date,
-
-                        **result,
-
-                        "EMA_Distance_ATR":
-                            setup[
-                                "EMA_Distance_ATR"
-                            ],
-
-                        "Close_Location":
-                            setup[
-                                "Close_Location"
-                            ],
-
-                        "Relative_Volume":
-                            setup[
-                                "Relative_Volume"
-                            ]
-                    }
-                )
-
-
-                diagnostic[
-                    "Trades"
-                ] += 1
-
-
-        except Exception as e:
+        if number % 25 == 0:
 
             print(
-                f"   ERROR: "
-                f"{type(e).__name__}: {e}"
+                f"{number}/{len(tickers)}"
             )
+
+
+        for i in range(
+            210,
+            len(df)
+            - ENTRY_VALID_DAYS
+            - 1
+        ):
+
+            signal_date = pd.Timestamp(
+                df.index[i]
+            )
+
+
+            if signal_date < backtest_start:
+                continue
+
+
+            if signal_date > end_date:
+                break
+
+
+            required = [
+                "SMA200",
+                "SMA50",
+                "EMA20",
+                "ATR14",
+                "AVG_VOL20",
+                "LOW5"
+            ]
+
+
+            if any(
+                pd.isna(
+                    df[col].iloc[i]
+                )
+                for col in required
+            ):
+
+                continue
+
+
+            diagnostics[
+                "Stock_Days"
+            ] += 1
+
+
+            setup = pullback_setup(
+                df,
+                i
+            )
+
+
+            if setup is None:
+                continue
+
+
+            diagnostics[
+                "Raw_Setups"
+            ] += 1
+
+
+            trigger = float(
+                setup["Trigger"]
+            )
+
+            stop = float(
+                setup["Stop"]
+            )
+
+
+            entry_index = find_entry(
+                df,
+                i,
+                trigger
+            )
+
+
+            if entry_index is None:
+
+                diagnostics[
+                    "No_Trigger"
+                ] += 1
+
+                continue
+
+
+            entry_date = pd.Timestamp(
+                df.index[
+                    entry_index
+                ]
+            )
+
+
+            if entry_date > end_date:
+                continue
+
+
+            if not market_allows_long(
+                primary_market,
+                dxy,
+                entry_date
+            ):
+
+                diagnostics[
+                    "Market_Rejected"
+                ] += 1
+
+                continue
+
+
+            result = simulate_trade(
+                df,
+                entry_index,
+                trigger,
+                stop
+            )
+
+
+            if result is None:
+                continue
+
+
+            qqq_bull = above_sma200(
+                qqq,
+                entry_date
+            )
+
+
+            trades.append(
+                {
+                    "Universe":
+                        universe_name,
+
+                    "Ticker":
+                        ticker,
+
+                    "Sector":
+                        sector_map.get(
+                            ticker,
+                            "Unknown"
+                        ),
+
+                    "Signal_Date":
+                        signal_date,
+
+                    **result,
+
+                    "QQQ_Bull_At_Entry":
+                        qqq_bull,
+
+                    "EMA_Distance_ATR":
+                        setup[
+                            "EMA_Distance_ATR"
+                        ],
+
+                    "Close_Location":
+                        setup[
+                            "Close_Location"
+                        ],
+
+                    "Relative_Volume":
+                        setup[
+                            "Relative_Volume"
+                        ]
+                }
+            )
+
+
+            diagnostics[
+                "Trades"
+            ] += 1
 
 
     trades = pd.DataFrame(
@@ -1073,17 +1205,18 @@ def generate_all_trades(
         )
 
 
-    return (
-        trades,
-        diagnostic
-    )
+    return trades, diagnostics
 
 
 # ============================================================
-# OVERALL PERFORMANCE IN R
+# METRICS
 # ============================================================
 
-def overall_stats(trades):
+def performance_stats(trades):
+
+    if trades.empty:
+        return {}
+
 
     positive = trades.loc[
         trades["Net_R"] > 0,
@@ -1096,7 +1229,7 @@ def overall_stats(trades):
     ]
 
 
-    profit_factor_r = (
+    pf = (
         positive.sum()
         /
         abs(
@@ -1110,85 +1243,71 @@ def overall_stats(trades):
 
 
     start = pd.Timestamp(
-        trades[
-            "Entry_Date"
-        ].min()
+        trades["Entry_Date"].min()
     )
 
     end = pd.Timestamp(
-        trades[
-            "Exit_Date"
-        ].max()
+        trades["Exit_Date"].max()
     )
 
     years = (
-        (
-            end - start
-        ).days
-        / 365.25
+        end - start
+    ).days / 365.25
+
+
+    yearly = (
+        trades
+        .assign(
+            Year=pd.to_datetime(
+                trades["Entry_Date"]
+            ).dt.year
+        )
+        .groupby("Year")["Net_R"]
+        .mean()
     )
 
 
     return {
         "Trades":
-            len(
-                trades
-            ),
+            len(trades),
 
-        "Years":
-            years,
-
-        "Trades_Per_Year":
-            len(
-                trades
-            )
-            / years,
+        "Trades_Year":
+            len(trades) / years,
 
         "Win_%":
             (
-                trades[
-                    "Net_R"
-                ] > 0
-            ).mean()
-            * 100,
+                trades["Net_R"] > 0
+            ).mean() * 100,
 
         "Avg_R":
-            trades[
-                "Net_R"
-            ].mean(),
+            trades["Net_R"].mean(),
 
         "Median_R":
-            trades[
-                "Net_R"
-            ].median(),
+            trades["Net_R"].median(),
 
         "PF_R":
-            profit_factor_r,
+            pf,
 
         "Total_R":
-            trades[
-                "Net_R"
-            ].sum(),
+            trades["Net_R"].sum(),
 
-        "Avg_Holding_Bars":
-            trades[
-                "Holding_Bars"
-            ].mean(),
+        "Positive_Years_%":
+            (
+                yearly > 0
+            ).mean() * 100,
 
-        "Median_Holding_Bars":
-            trades[
-                "Holding_Bars"
-            ].median(),
+        "Positive_Years":
+            int(
+                (yearly > 0).sum()
+            ),
 
-        "Avg_Holding_Days":
-            trades[
-                "Holding_Days"
-            ].mean()
+        "Years":
+            len(yearly)
     }
 
 
 # ============================================================
-# YEARLY
+# YEARLY ANALYSIS
 # ============================================================
 
 def yearly_analysis(trades):
@@ -1197,9 +1316,7 @@ def yearly_analysis(trades):
 
     df["Year"] = (
         pd.to_datetime(
-            df[
-                "Entry_Date"
-            ]
+            df["Entry_Date"]
         )
         .dt.year
     )
@@ -1208,39 +1325,13 @@ def yearly_analysis(trades):
     rows = []
 
 
-    for year, group in (
-        df.groupby(
-            "Year"
-        )
+    for year, group in df.groupby(
+        "Year"
     ):
 
-        positive = group.loc[
-            group[
-                "Net_R"
-            ] > 0,
-            "Net_R"
-        ]
-
-        negative = group.loc[
-            group[
-                "Net_R"
-            ] < 0,
-            "Net_R"
-        ]
-
-
-        pf = (
-            positive.sum()
-            /
-            abs(
-                negative.sum()
-            )
-            if abs(
-                negative.sum()
-            ) > 0
-            else np.inf
+        stats = performance_stats(
+            group
         )
-
 
         rows.append(
             {
@@ -1248,519 +1339,80 @@ def yearly_analysis(trades):
                     year,
 
                 "Trades":
-                    len(
-                        group
-                    ),
+                    len(group),
 
                 "Avg_R":
-                    group[
-                        "Net_R"
-                    ].mean(),
+                    group["Net_R"].mean(),
 
                 "Median_R":
-                    group[
-                        "Net_R"
-                    ].median(),
+                    group["Net_R"].median(),
 
                 "PF_R":
-                    pf,
+                    stats["PF_R"],
 
                 "Total_R":
-                    group[
-                        "Net_R"
-                    ].sum(),
+                    group["Net_R"].sum(),
 
                 "Win_%":
                     (
-                        group[
-                            "Net_R"
-                        ] > 0
-                    ).mean()
-                    * 100
+                        group["Net_R"] > 0
+                    ).mean() * 100
             }
         )
 
 
     return (
-        pd.DataFrame(
-            rows
-        )
-        .set_index(
-            "Year"
-        )
+        pd.DataFrame(rows)
+        .set_index("Year")
     )
 
 
 # ============================================================
-# 5-YEAR PERIOD ANALYSIS
+# SECTOR ANALYSIS
 # ============================================================
 
-def period_analysis(trades):
-
-    df = trades.copy()
-
-
-    start_year = int(
-        pd.to_datetime(
-            df[
-                "Entry_Date"
-            ]
-        )
-        .dt.year
-        .min()
-    )
-
-
-    end_year = int(
-        pd.to_datetime(
-            df[
-                "Entry_Date"
-            ]
-        )
-        .dt.year
-        .max()
-    )
-
-
-    periods = []
-
-
-    first = start_year
-
-
-    while first <= end_year:
-
-        last = min(
-            first + 4,
-            end_year
-        )
-
-
-        group = df[
-            (
-                pd.to_datetime(
-                    df[
-                        "Entry_Date"
-                    ]
-                )
-                .dt.year
-                >= first
-            )
-            &
-            (
-                pd.to_datetime(
-                    df[
-                        "Entry_Date"
-                    ]
-                )
-                .dt.year
-                <= last
-            )
-        ]
-
-
-        if not group.empty:
-
-            positive = group.loc[
-                group[
-                    "Net_R"
-                ] > 0,
-                "Net_R"
-            ]
-
-            negative = group.loc[
-                group[
-                    "Net_R"
-                ] < 0,
-                "Net_R"
-            ]
-
-
-            pf = (
-                positive.sum()
-                /
-                abs(
-                    negative.sum()
-                )
-                if abs(
-                    negative.sum()
-                ) > 0
-                else np.inf
-            )
-
-
-            periods.append(
-                {
-                    "Period":
-                        f"{first}-{last}",
-
-                    "Trades":
-                        len(
-                            group
-                        ),
-
-                    "Avg_R":
-                        group[
-                            "Net_R"
-                        ].mean(),
-
-                    "Median_R":
-                        group[
-                            "Net_R"
-                        ].median(),
-
-                    "PF_R":
-                        pf,
-
-                    "Total_R":
-                        group[
-                            "Net_R"
-                        ].sum(),
-
-                    "Win_%":
-                        (
-                            group[
-                                "Net_R"
-                            ] > 0
-                        ).mean()
-                        * 100
-                }
-            )
-
-
-        first += 5
-
-
-    return (
-        pd.DataFrame(
-            periods
-        )
-        .set_index(
-            "Period"
-        )
-    )
-
-
-# ============================================================
-# CUMULATIVE R DRAWDOWN
-#
-# NOT ACCOUNT DRAWDOWN.
-#
-# This simply tells us about losing sequences in signal R.
-# ============================================================
-
-def cumulative_r_analysis(trades):
-
-    ordered = (
-        trades
-        .sort_values(
-            [
-                "Exit_Date",
-                "Ticker"
-            ]
-        )
-        .copy()
-    )
-
-
-    ordered[
-        "Cumulative_R"
-    ] = (
-        ordered[
-            "Net_R"
-        ]
-        .cumsum()
-    )
-
-
-    peak = (
-        ordered[
-            "Cumulative_R"
-        ]
-        .cummax()
-    )
-
-
-    drawdown_r = (
-        ordered[
-            "Cumulative_R"
-        ]
-        - peak
-    )
-
-
-    return {
-        "Max_R_Drawdown":
-            drawdown_r.min(),
-
-        "Final_Cumulative_R":
-            ordered[
-                "Cumulative_R"
-            ].iloc[-1]
-    }
-
-
-# ============================================================
-# EXIT ANALYSIS
-# ============================================================
-
-def exit_analysis(trades):
+def sector_analysis(trades):
 
     rows = []
 
 
-    for reason, group in (
-        trades.groupby(
-            "Exit_Reason"
-        )
+    for sector, group in (
+        trades.groupby("Sector")
     ):
 
-        rows.append(
-            {
-                "Exit":
-                    reason,
-
-                "Trades":
-                    len(
-                        group
-                    ),
-
-                "Avg_R":
-                    group[
-                        "Net_R"
-                    ].mean(),
-
-                "Median_R":
-                    group[
-                        "Net_R"
-                    ].median(),
-
-                "Total_R":
-                    group[
-                        "Net_R"
-                    ].sum(),
-
-                "Win_%":
-                    (
-                        group[
-                            "Net_R"
-                        ] > 0
-                    ).mean()
-                    * 100,
-
-                "Avg_Holding_Bars":
-                    group[
-                        "Holding_Bars"
-                    ].mean()
-            }
-        )
-
-
-    return (
-        pd.DataFrame(
-            rows
-        )
-        .set_index(
-            "Exit"
-        )
-    )
-
-
-# ============================================================
-# HOLDING PERIOD BUCKETS
-# ============================================================
-
-def holding_analysis(trades):
-
-    df = trades.copy()
-
-
-    bins = [
-        0,
-        5,
-        10,
-        15,
-        20,
-        25,
-        31
-    ]
-
-
-    labels = [
-        "1-4",
-        "5-9",
-        "10-14",
-        "15-19",
-        "20-24",
-        "25-30"
-    ]
-
-
-    df[
-        "Holding_Bucket"
-    ] = pd.cut(
-        df[
-            "Holding_Bars"
-        ],
-        bins=bins,
-        labels=labels,
-        right=False
-    )
-
-
-    rows = []
-
-
-    for bucket, group in (
-        df.groupby(
-            "Holding_Bucket",
-            observed=False
-        )
-    ):
-
-        if group.empty:
+        if len(group) < 10:
             continue
 
 
-        positive = group.loc[
-            group[
-                "Net_R"
-            ] > 0,
-            "Net_R"
-        ]
-
-        negative = group.loc[
-            group[
-                "Net_R"
-            ] < 0,
-            "Net_R"
-        ]
-
-
-        pf = (
-            positive.sum()
-            /
-            abs(
-                negative.sum()
-            )
-            if abs(
-                negative.sum()
-            ) > 0
-            else np.inf
+        stats = performance_stats(
+            group
         )
 
 
         rows.append(
             {
-                "Holding":
-                    str(
-                        bucket
-                    ),
+                "Sector":
+                    sector,
 
                 "Trades":
-                    len(
-                        group
-                    ),
+                    len(group),
 
                 "Avg_R":
-                    group[
-                        "Net_R"
-                    ].mean(),
+                    group["Net_R"].mean(),
 
                 "Median_R":
-                    group[
-                        "Net_R"
-                    ].median(),
+                    group["Net_R"].median(),
 
                 "PF_R":
-                    pf,
+                    stats["PF_R"],
 
                 "Total_R":
-                    group[
-                        "Net_R"
-                    ].sum(),
+                    group["Net_R"].sum(),
 
                 "Win_%":
                     (
-                        group[
-                            "Net_R"
-                        ] > 0
-                    ).mean()
-                    * 100
-            }
-        )
-
-
-    return (
-        pd.DataFrame(
-            rows
-        )
-        .set_index(
-            "Holding"
-        )
-    )
-
-
-# ============================================================
-# CONCURRENT TRADE LOAD
-#
-# Diagnostic:
-# If every signal were accepted, how many trades would
-# theoretically overlap at the same time?
-# ============================================================
-
-def concurrency_analysis(
-    trades,
-    qqq,
-    backtest_start,
-    end_date
-):
-
-    calendar = qqq.loc[
-        (
-            qqq.index >= backtest_start
-        )
-        &
-        (
-            qqq.index <= end_date
-        )
-    ].index
-
-
-    rows = []
-
-
-    for date in calendar:
-
-        date = pd.Timestamp(
-            date
-        )
-
-
-        concurrent = (
-            (
-                trades[
-                    "Entry_Date"
-                ]
-                <= date
-            )
-            &
-            (
-                trades[
-                    "Exit_Date"
-                ]
-                >= date
-            )
-        ).sum()
-
-
-        rows.append(
-            {
-                "Date":
-                    date,
-
-                "Concurrent_Trades":
-                    concurrent
+                        group["Net_R"] > 0
+                    ).mean() * 100
             }
         )
 
@@ -1770,213 +1422,114 @@ def concurrency_analysis(
     )
 
 
-    return {
-        "Average":
-            result[
-                "Concurrent_Trades"
-            ].mean(),
+    if result.empty:
+        return result
 
-        "Median":
-            result[
-                "Concurrent_Trades"
-            ].median(),
 
-        "Max":
-            result[
-                "Concurrent_Trades"
-            ].max(),
-
-        "Days_Above_5":
-            (
-                result[
-                    "Concurrent_Trades"
-                ] > 5
-            ).sum(),
-
-        "Pct_Days_Above_5":
-            (
-                result[
-                    "Concurrent_Trades"
-                ] > 5
-            ).mean()
-            * 100,
-
-        "Daily":
-            result
-    }
+    return (
+        result
+        .sort_values(
+            "Avg_R",
+            ascending=False
+        )
+        .set_index("Sector")
+    )
 
 
 # ============================================================
-# MAIN
+# QQQ BULL VS BEAR ANALYSIS
 # ============================================================
 
-def main():
+def qqq_state_analysis(trades):
 
-    print(
-        "=" * 120
-    )
-
-    print(
-        "V24 - ALL SIGNALS / PURE STRATEGY EDGE"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "NO portfolio restrictions."
-    )
-
-    print(
-        "Every valid signal is evaluated independently."
-    )
-
-    print()
-
-    print(
-        "CAGR is intentionally NOT calculated."
-    )
-
-    print(
-        "This test measures signal quality, not portfolio return."
-    )
+    rows = []
 
 
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
-
-    print()
-
-    print(
-        f"Downloading {len(TICKERS)} stocks..."
-    )
-
-
-    all_data = yf.download(
-        TICKERS,
-        period=DOWNLOAD_PERIOD,
-        interval="1d",
-        group_by="ticker",
-        progress=False,
-        auto_adjust=True,
-        repair=True,
-        threads=False
-    )
-
-
-    # threads=False deliberately used to reduce
-    # yfinance SQLite 'database is locked' errors.
-
-
-    qqq = download_market(
-        "QQQ",
-        "QQQ"
-    )
-
-
-    dxy = download_market(
-        "DX-Y.NYB",
-        "DXY"
-    )
-
-
-    end_date = min(
-        pd.Timestamp(
-            qqq.index.max()
-        ),
-        pd.Timestamp(
-            dxy.index.max()
+    for qqq_bull, group in (
+        trades.groupby(
+            "QQQ_Bull_At_Entry"
         )
-    )
-
-
-    requested_start = (
-        end_date
-        - pd.DateOffset(
-            years=BACKTEST_YEARS
-        )
-    )
-
-
-    backtest_start = max(
-        requested_start,
-        pd.Timestamp(
-            qqq.index.min()
-        ),
-        pd.Timestamp(
-            dxy.index.min()
-        )
-    )
-
-
-    print(
-        f"Backtest: "
-        f"{backtest_start.date()} "
-        f"-> {end_date.date()}"
-    )
-
-
-    # ========================================================
-    # ALL SIGNALS
-    # ========================================================
-
-    (
-        trades,
-        diagnostic
-    ) = generate_all_trades(
-        all_data,
-        qqq,
-        dxy,
-        backtest_start,
-        end_date
-    )
-
-
-    if trades.empty:
-
-        print(
-            "No trades generated."
-        )
-
-        return
-
-
-    # ========================================================
-    # DIAGNOSTICS
-    # ========================================================
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "SIGNAL FUNNEL"
-    )
-
-    print(
-        "=" * 120
-    )
-
-
-    for key, value in (
-        diagnostic.items()
     ):
 
-        print(
-            f"{key:<25}"
-            f"{value:>10}"
+        stats = performance_stats(
+            group
         )
 
 
-    # ========================================================
-    # OVERALL
-    # ========================================================
+        rows.append(
+            {
+                "QQQ_State":
+                    (
+                        "QQQ > SMA200"
+                        if qqq_bull
+                        else
+                        "QQQ < SMA200"
+                    ),
 
-    stats = overall_stats(
+                "Trades":
+                    len(group),
+
+                "Avg_R":
+                    group["Net_R"].mean(),
+
+                "Median_R":
+                    group["Net_R"].median(),
+
+                "PF_R":
+                    stats["PF_R"],
+
+                "Total_R":
+                    group["Net_R"].sum(),
+
+                "Win_%":
+                    (
+                        group["Net_R"] > 0
+                    ).mean() * 100
+            }
+        )
+
+
+    return (
+        pd.DataFrame(rows)
+        .set_index("QQQ_State")
+    )
+
+
+# ============================================================
+# SECTOR PERFORMANCE WHILE QQQ IS BEARISH
+# ============================================================
+
+def defensive_when_qqq_bear(
+    trades
+):
+
+    bear = trades[
+        trades[
+            "QQQ_Bull_At_Entry"
+        ] == False
+    ].copy()
+
+
+    if bear.empty:
+        return pd.DataFrame()
+
+
+    return sector_analysis(
+        bear
+    )
+
+
+# ============================================================
+# PRINT VARIANT
+# ============================================================
+
+def print_variant(
+    name,
+    trades,
+    diagnostics
+):
+
+    stats = performance_stats(
         trades
     )
 
@@ -1987,14 +1540,34 @@ def main():
         "=" * 120
     )
 
-    print(
-        "PURE STRATEGY RESULTS"
-    )
+    print(name)
 
     print(
         "=" * 120
     )
 
+
+    print(
+        f"Stocks processed:      "
+        f"{diagnostics['Stocks']}"
+    )
+
+    print(
+        f"Raw setups:            "
+        f"{diagnostics['Raw_Setups']}"
+    )
+
+    print(
+        f"No trigger:            "
+        f"{diagnostics['No_Trigger']}"
+    )
+
+    print(
+        f"Market rejected:       "
+        f"{diagnostics['Market_Rejected']}"
+    )
+
+    print()
 
     print(
         f"Trades:                "
@@ -2003,7 +1576,7 @@ def main():
 
     print(
         f"Trades/year:           "
-        f"{stats['Trades_Per_Year']:.2f}"
+        f"{stats['Trades_Year']:.2f}"
     )
 
     print(
@@ -2031,338 +1604,603 @@ def main():
         f"{stats['Total_R']:.2f}R"
     )
 
-    print()
-
     print(
-        f"Avg holding bars:      "
-        f"{stats['Avg_Holding_Bars']:.2f}"
-    )
-
-    print(
-        f"Median holding bars:   "
-        f"{stats['Median_Holding_Bars']:.2f}"
-    )
-
-    print(
-        f"Avg calendar days:     "
-        f"{stats['Avg_Holding_Days']:.2f}"
+        f"Positive years:        "
+        f"{stats['Positive_Years']}/"
+        f"{stats['Years']} "
+        f"({stats['Positive_Years_%']:.1f}%)"
     )
 
 
-    # ========================================================
-    # R DRAWDOWN
-    # ========================================================
-
-    r_stats = cumulative_r_analysis(
-        trades
-    )
+    return stats
 
 
-    print()
+# ============================================================
+# MAIN
+# ============================================================
 
-    print(
-        f"Final cumulative R:    "
-        f"{r_stats['Final_Cumulative_R']:.2f}R"
-    )
-
-    print(
-        f"Max cumulative R DD:   "
-        f"{r_stats['Max_R_Drawdown']:.2f}R"
-    )
-
-    print(
-        "(This is NOT portfolio drawdown.)"
-    )
-
-
-    # ========================================================
-    # YEARLY
-    # ========================================================
-
-    yearly = yearly_analysis(
-        trades
-    )
-
-
-    print()
+def main():
 
     print(
         "=" * 120
     )
 
     print(
-        "YEAR-BY-YEAR SIGNAL EDGE"
+        "V25 - UNIVERSE EXPANSION / DIVERSIFICATION TEST"
     )
 
     print(
         "=" * 120
     )
 
+    print(
+        "Same strategy. No portfolio constraints."
+    )
+
+    print()
 
     print(
-        yearly
-        .round(3)
-        .to_string()
+        "A: Nasdaq-100 + QQQ regime"
+    )
+
+    print(
+        "B: S&P 500 + QQQ regime"
+    )
+
+    print(
+        "C: S&P 500 + SPY regime"
     )
 
 
-    positive_years = (
-        yearly[
-            "Avg_R"
-        ] > 0
-    ).sum()
+    # ========================================================
+    # CONSTITUENTS
+    # ========================================================
 
-
-    total_years = len(
-        yearly
+    sp500_tickers, sector_map = (
+        get_sp500_constituents()
     )
 
 
     print()
 
     print(
-        f"Positive Avg-R years:  "
-        f"{positive_years}/{total_years} "
-        f"({positive_years / total_years * 100:.1f}%)"
+        f"Nasdaq tickers:         "
+        f"{len(NASDAQ_TICKERS)}"
+    )
+
+    print(
+        f"S&P 500 tickers:        "
+        f"{len(sp500_tickers)}"
     )
 
 
     # ========================================================
-    # 5 YEAR PERIODS
+    # DOWNLOAD MARKETS
     # ========================================================
 
-    periods = period_analysis(
-        trades
+    qqq = download_market(
+        "QQQ",
+        "QQQ"
+    )
+
+    spy = download_market(
+        "SPY",
+        "SPY"
+    )
+
+    dxy = download_market(
+        "DX-Y.NYB",
+        "DXY"
     )
 
 
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "5-YEAR PERIOD ROBUSTNESS"
-    )
-
-    print(
-        "=" * 120
-    )
-
-
-    print(
-        periods
-        .round(3)
-        .to_string()
+    end_date = min(
+        pd.Timestamp(
+            qqq.index.max()
+        ),
+        pd.Timestamp(
+            spy.index.max()
+        ),
+        pd.Timestamp(
+            dxy.index.max()
+        )
     )
 
 
-    # ========================================================
-    # EXIT ANALYSIS
-    # ========================================================
-
-    exits = exit_analysis(
-        trades
-    )
-
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "EXIT TYPE ANALYSIS"
-    )
-
-    print(
-        "=" * 120
-    )
-
-
-    print(
-        exits
-        .round(3)
-        .to_string()
-    )
-
-
-    # ========================================================
-    # HOLDING ANALYSIS
-    # ========================================================
-
-    holding = holding_analysis(
-        trades
-    )
-
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "HOLDING PERIOD ANALYSIS"
-    )
-
-    print(
-        "=" * 120
-    )
-
-
-    print(
-        holding
-        .round(3)
-        .to_string()
-    )
-
-
-    # ========================================================
-    # CONCURRENCY
-    # ========================================================
-
-    concurrency = concurrency_analysis(
-        trades,
-        qqq,
-        backtest_start,
+    backtest_start = (
         end_date
+        - pd.DateOffset(
+            years=BACKTEST_YEARS
+        )
     )
 
 
     print()
 
     print(
-        "=" * 120
-    )
-
-    print(
-        "IF WE TOOK EVERY SIGNAL: CONCURRENT POSITIONS"
-    )
-
-    print(
-        "=" * 120
-    )
-
-
-    print(
-        f"Average simultaneous:  "
-        f"{concurrency['Average']:.2f}"
-    )
-
-    print(
-        f"Median simultaneous:   "
-        f"{concurrency['Median']:.2f}"
-    )
-
-    print(
-        f"Maximum simultaneous:  "
-        f"{concurrency['Max']}"
-    )
-
-    print(
-        f"Days with >5 trades:   "
-        f"{concurrency['Days_Above_5']}"
-    )
-
-    print(
-        f"% days with >5:        "
-        f"{concurrency['Pct_Days_Above_5']:.2f}%"
+        f"Backtest:              "
+        f"{backtest_start.date()} "
+        f"-> {end_date.date()}"
     )
 
 
     # ========================================================
-    # SIMPLE EDGE CHECK
+    # DOWNLOAD UNION ONCE
+    # ========================================================
+
+    all_tickers = sorted(
+        set(
+            NASDAQ_TICKERS
+            +
+            sp500_tickers
+        )
+    )
+
+
+    print()
+
+    print(
+        f"Unique stocks to download: "
+        f"{len(all_tickers)}"
+    )
+
+
+    raw_stock_data = (
+        download_stocks(
+            all_tickers
+        )
+    )
+
+
+    # ========================================================
+    # PREPARE ONCE
     # ========================================================
 
     print()
 
     print(
-        "=" * 120
-    )
-
-    print(
-        "PURE EDGE CHECK"
-    )
-
-    print(
-        "=" * 120
+        "Preparing indicators..."
     )
 
 
-    checks = {
-        "Avg R >= 0.10":
-            stats[
-                "Avg_R"
-            ] >= 0.10,
-
-        "PF_R >= 1.25":
-            stats[
-                "PF_R"
-            ] >= 1.25,
-
-        "Positive years >= 70%":
-            (
-                positive_years
-                / total_years
-            ) >= 0.70
-    }
+    prepared_data = {}
 
 
-    for name, passed in (
-        checks.items()
+    for ticker, df in (
+        raw_stock_data.items()
     ):
 
-        print(
-            f"{name:<25}"
-            f"{'PASS' if passed else 'FAIL'}"
-        )
+        try:
+
+            prepared = prepare_stock(
+                df
+            )
+
+            if len(prepared) >= 250:
+
+                prepared_data[
+                    ticker
+                ] = prepared
+
+        except Exception as e:
+
+            print(
+                f"PREP ERROR {ticker}: {e}"
+            )
 
 
     print(
-        f"\nScore: "
-        f"{sum(checks.values())}/"
-        f"{len(checks)}"
+        f"Prepared stocks:       "
+        f"{len(prepared_data)}"
     )
+
+
+    # ========================================================
+    # A - NASDAQ / QQQ
+    # ========================================================
+
+    trades_a, diag_a = (
+        generate_all_trades(
+            universe_name=
+                "NASDAQ_QQQ",
+
+            tickers=
+                NASDAQ_TICKERS,
+
+            prepared_data=
+                prepared_data,
+
+            primary_market=
+                qqq,
+
+            dxy=
+                dxy,
+
+            qqq=
+                qqq,
+
+            backtest_start=
+                backtest_start,
+
+            end_date=
+                end_date,
+
+            sector_map=
+                sector_map
+        )
+    )
+
+
+    # ========================================================
+    # B - S&P / QQQ
+    # ========================================================
+
+    trades_b, diag_b = (
+        generate_all_trades(
+            universe_name=
+                "SP500_QQQ",
+
+            tickers=
+                sp500_tickers,
+
+            prepared_data=
+                prepared_data,
+
+            primary_market=
+                qqq,
+
+            dxy=
+                dxy,
+
+            qqq=
+                qqq,
+
+            backtest_start=
+                backtest_start,
+
+            end_date=
+                end_date,
+
+            sector_map=
+                sector_map
+        )
+    )
+
+
+    # ========================================================
+    # C - S&P / SPY
+    # ========================================================
+
+    trades_c, diag_c = (
+        generate_all_trades(
+            universe_name=
+                "SP500_SPY",
+
+            tickers=
+                sp500_tickers,
+
+            prepared_data=
+                prepared_data,
+
+            primary_market=
+                spy,
+
+            dxy=
+                dxy,
+
+            qqq=
+                qqq,
+
+            backtest_start=
+                backtest_start,
+
+            end_date=
+                end_date,
+
+            sector_map=
+                sector_map
+        )
+    )
+
+
+    # ========================================================
+    # PRINT RESULTS
+    # ========================================================
+
+    stats_a = print_variant(
+        "A - NASDAQ-100 + QQQ REGIME",
+        trades_a,
+        diag_a
+    )
+
+
+    stats_b = print_variant(
+        "B - S&P 500 + QQQ REGIME",
+        trades_b,
+        diag_b
+    )
+
+
+    stats_c = print_variant(
+        "C - S&P 500 + SPY REGIME",
+        trades_c,
+        diag_c
+    )
+
+
+    # ========================================================
+    # DIRECT COMPARISON
+    # ========================================================
+
+    comparison = pd.DataFrame(
+        {
+            "NASDAQ_QQQ": {
+                "Trades":
+                    stats_a["Trades"],
+
+                "Trades/year":
+                    stats_a["Trades_Year"],
+
+                "Avg_R":
+                    stats_a["Avg_R"],
+
+                "PF_R":
+                    stats_a["PF_R"],
+
+                "Win_%":
+                    stats_a["Win_%"],
+
+                "Positive_Years_%":
+                    stats_a[
+                        "Positive_Years_%"
+                    ],
+
+                "Total_R":
+                    stats_a["Total_R"]
+            },
+
+            "SP500_QQQ": {
+                "Trades":
+                    stats_b["Trades"],
+
+                "Trades/year":
+                    stats_b["Trades_Year"],
+
+                "Avg_R":
+                    stats_b["Avg_R"],
+
+                "PF_R":
+                    stats_b["PF_R"],
+
+                "Win_%":
+                    stats_b["Win_%"],
+
+                "Positive_Years_%":
+                    stats_b[
+                        "Positive_Years_%"
+                    ],
+
+                "Total_R":
+                    stats_b["Total_R"]
+            },
+
+            "SP500_SPY": {
+                "Trades":
+                    stats_c["Trades"],
+
+                "Trades/year":
+                    stats_c["Trades_Year"],
+
+                "Avg_R":
+                    stats_c["Avg_R"],
+
+                "PF_R":
+                    stats_c["PF_R"],
+
+                "Win_%":
+                    stats_c["Win_%"],
+
+                "Positive_Years_%":
+                    stats_c[
+                        "Positive_Years_%"
+                    ],
+
+                "Total_R":
+                    stats_c["Total_R"]
+            }
+        }
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "V25 DIRECT COMPARISON"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        comparison
+        .round(3)
+        .to_string()
+    )
+
+
+    # ========================================================
+    # YEARLY C
+    # ========================================================
+
+    yearly_c = yearly_analysis(
+        trades_c
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "S&P 500 + SPY - YEAR BY YEAR"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        yearly_c
+        .round(3)
+        .to_string()
+    )
+
+
+    # ========================================================
+    # SECTOR C
+    # ========================================================
+
+    sectors_c = sector_analysis(
+        trades_c
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "S&P 500 + SPY - SECTOR PERFORMANCE"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        sectors_c
+        .round(3)
+        .to_string()
+    )
+
+
+    # ========================================================
+    # QQQ BULL / BEAR
+    # ========================================================
+
+    qqq_states = qqq_state_analysis(
+        trades_c
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "S&P 500 + SPY - PERFORMANCE BY QQQ REGIME"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        qqq_states
+        .round(3)
+        .to_string()
+    )
+
+
+    # ========================================================
+    # DEFENSIVE PERFORMANCE WHEN QQQ < SMA200
+    # ========================================================
+
+    bear_sectors = (
+        defensive_when_qqq_bear(
+            trades_c
+        )
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "SECTOR PERFORMANCE WHEN QQQ < SMA200"
+    )
+
+    print(
+        "=" * 120
+    )
+
+
+    if bear_sectors.empty:
+
+        print(
+            "No qualifying trades."
+        )
+
+    else:
+
+        print(
+            bear_sectors
+            .round(3)
+            .to_string()
+        )
 
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    trades.to_csv(
-        "v24_all_signals.csv",
+    trades_a.to_csv(
+        "v25_nasdaq_qqq.csv",
         index=False
     )
 
-
-    yearly.to_csv(
-        "v24_yearly.csv"
-    )
-
-
-    periods.to_csv(
-        "v24_periods.csv"
-    )
-
-
-    exits.to_csv(
-        "v24_exits.csv"
-    )
-
-
-    holding.to_csv(
-        "v24_holding.csv"
-    )
-
-
-    concurrency[
-        "Daily"
-    ].to_csv(
-        "v24_concurrency.csv",
+    trades_b.to_csv(
+        "v25_sp500_qqq.csv",
         index=False
+    )
+
+    trades_c.to_csv(
+        "v25_sp500_spy.csv",
+        index=False
+    )
+
+    comparison.to_csv(
+        "v25_comparison.csv"
+    )
+
+    yearly_c.to_csv(
+        "v25_sp500_spy_yearly.csv"
+    )
+
+    sectors_c.to_csv(
+        "v25_sp500_spy_sectors.csv"
+    )
+
+    qqq_states.to_csv(
+        "v25_qqq_regime_analysis.csv"
+    )
+
+    bear_sectors.to_csv(
+        "v25_qqq_bear_sector_analysis.csv"
     )
 
 
@@ -2373,7 +2211,7 @@ def main():
     )
 
     print(
-        "V24 completed."
+        "V25 completed."
     )
 
     print(
