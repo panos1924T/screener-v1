@@ -1,11 +1,13 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+from io import StringIO
 import time
 
 
 # ============================================================
-# V25 - UNIVERSE EXPANSION TEST
+# V25 - UNIVERSE EXPANSION / DIVERSIFICATION TEST
 #
 # A) NASDAQ-100 + QQQ regime
 # B) S&P 500    + QQQ regime
@@ -74,41 +76,171 @@ NASDAQ_TICKERS = [
 
 # ============================================================
 # S&P 500 CONSTITUENTS
+#
+# Wikipedia first.
+# GitHub CSV fallback if Wikipedia returns 403 or fails.
 # ============================================================
 
 def get_sp500_constituents():
 
-    url = (
+    wiki_url = (
         "https://en.wikipedia.org/wiki/"
         "List_of_S%26P_500_companies"
     )
 
-    print("Downloading current S&P 500 constituent list...")
-
-    tables = pd.read_html(url)
-
-    table = tables[0].copy()
-
-    table["Yahoo_Ticker"] = (
-        table["Symbol"]
-        .str.replace(".", "-", regex=False)
+    fallback_url = (
+        "https://raw.githubusercontent.com/"
+        "datasets/s-and-p-500-companies/"
+        "master/data/constituents.csv"
     )
 
-    sector_map = dict(
-        zip(
-            table["Yahoo_Ticker"],
-            table["GICS Sector"]
+    headers = {
+        "User-Agent":
+            "Mozilla/5.0 "
+            "(X11; Linux x86_64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+    }
+
+    print(
+        "Downloading current S&P 500 constituent list..."
+    )
+
+    table = None
+
+    try:
+
+        response = requests.get(
+            wiki_url,
+            headers=headers,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        tables = pd.read_html(
+            StringIO(
+                response.text
+            )
+        )
+
+        table = tables[0].copy()
+
+        print(
+            "Loaded S&P 500 list from Wikipedia."
+        )
+
+    except Exception as e:
+
+        print(
+            f"Wikipedia failed: {e}"
+        )
+
+        print(
+            "Trying GitHub fallback..."
+        )
+
+        response = requests.get(
+            fallback_url,
+            headers=headers,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        table = pd.read_csv(
+            StringIO(
+                response.text
+            )
+        )
+
+        print(
+            "Loaded S&P 500 list from GitHub fallback."
+        )
+
+
+    if "Symbol" not in table.columns:
+
+        raise RuntimeError(
+            "S&P 500 source does not contain a Symbol column."
+        )
+
+
+    # Normalize sector column
+    if (
+        "Sector" in table.columns
+        and
+        "GICS Sector" not in table.columns
+    ):
+
+        table[
+            "GICS Sector"
+        ] = table[
+            "Sector"
+        ]
+
+
+    # Yahoo uses BRK-B instead of BRK.B, etc.
+    table[
+        "Yahoo_Ticker"
+    ] = (
+        table[
+            "Symbol"
+        ]
+        .astype(str)
+        .str.strip()
+        .str.replace(
+            ".",
+            "-",
+            regex=False
         )
     )
 
+
     tickers = (
-        table["Yahoo_Ticker"]
+        table[
+            "Yahoo_Ticker"
+        ]
         .dropna()
         .unique()
         .tolist()
     )
 
-    return tickers, sector_map
+
+    if "GICS Sector" in table.columns:
+
+        sector_map = dict(
+            zip(
+                table[
+                    "Yahoo_Ticker"
+                ],
+                table[
+                    "GICS Sector"
+                ]
+            )
+        )
+
+    else:
+
+        sector_map = {
+            ticker:
+                "Unknown"
+
+            for ticker in tickers
+        }
+
+
+    print(
+        f"S&P 500 constituents loaded: "
+        f"{len(tickers)}"
+    )
+
+
+    return (
+        tickers,
+        sector_map
+    )
 
 
 # ============================================================
@@ -117,16 +249,29 @@ def get_sp500_constituents():
 
 def calculate_atr(df, period=14):
 
-    previous_close = df["Close"].shift(1)
+    previous_close = (
+        df["Close"]
+        .shift(1)
+    )
 
     tr = pd.concat(
         [
             df["High"] - df["Low"],
-            (df["High"] - previous_close).abs(),
-            (df["Low"] - previous_close).abs()
+
+            (
+                df["High"]
+                - previous_close
+            ).abs(),
+
+            (
+                df["Low"]
+                - previous_close
+            ).abs()
         ],
         axis=1
-    ).max(axis=1)
+    ).max(
+        axis=1
+    )
 
     return tr.ewm(
         alpha=1 / period,
@@ -142,18 +287,17 @@ def prepare_stock(df):
 
     df = df.copy()
 
-    required_prices = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume"
-    ]
-
     df.dropna(
-        subset=required_prices,
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume"
+        ],
         inplace=True
     )
+
 
     df["SMA200"] = (
         df["Close"]
@@ -161,11 +305,13 @@ def prepare_stock(df):
         .mean()
     )
 
+
     df["SMA50"] = (
         df["Close"]
         .rolling(50)
         .mean()
     )
+
 
     df["EMA20"] = (
         df["Close"]
@@ -176,16 +322,19 @@ def prepare_stock(df):
         .mean()
     )
 
+
     df["ATR14"] = calculate_atr(
         df,
         ATR_PERIOD
     )
+
 
     df["AVG_VOL20"] = (
         df["Volume"]
         .rolling(20)
         .mean()
     )
+
 
     df["LOW5"] = (
         df["Low"]
@@ -194,6 +343,7 @@ def prepare_stock(df):
         .min()
     )
 
+
     return df
 
 
@@ -201,9 +351,15 @@ def prepare_stock(df):
 # MARKET DOWNLOAD
 # ============================================================
 
-def download_market(ticker, name):
+def download_market(
+    ticker,
+    name
+):
 
-    print(f"Downloading {name}...")
+    print(
+        f"Downloading {name}..."
+    )
+
 
     df = yf.download(
         ticker,
@@ -215,29 +371,36 @@ def download_market(ticker, name):
         threads=False
     )
 
+
     if df.empty:
+
         raise RuntimeError(
             f"No data downloaded for {name}"
         )
+
 
     if isinstance(
         df.columns,
         pd.MultiIndex
     ):
+
         df.columns = (
             df.columns
             .get_level_values(0)
         )
 
+
     df.dropna(
         inplace=True
     )
+
 
     df["SMA200"] = (
         df["Close"]
         .rolling(200)
         .mean()
     )
+
 
     return df
 
@@ -246,11 +409,16 @@ def download_market(ticker, name):
 # ROBUST STOCK DOWNLOAD
 # ============================================================
 
-def download_stocks(tickers):
+def download_stocks(
+    tickers
+):
 
     all_stock_data = {}
 
-    total = len(tickers)
+    total = len(
+        tickers
+    )
+
 
     for start in range(
         0,
@@ -263,11 +431,14 @@ def download_stocks(tickers):
             start + BATCH_SIZE
         ]
 
+
         print(
             f"Downloading stocks "
-            f"{start + 1}-{min(start + BATCH_SIZE, total)} "
+            f"{start + 1}-"
+            f"{min(start + BATCH_SIZE, total)} "
             f"of {total}..."
         )
+
 
         try:
 
@@ -305,17 +476,22 @@ def download_stocks(tickers):
                 .get_level_values(0)
             )
 
+
             for ticker in batch:
 
                 if ticker not in available:
                     continue
 
+
                 try:
 
                     df = (
-                        data[ticker]
+                        data[
+                            ticker
+                        ]
                         .copy()
                     )
+
 
                     if not df.empty:
 
@@ -323,7 +499,9 @@ def download_stocks(tickers):
                             ticker
                         ] = df
 
+
                 except Exception:
+
                     pass
 
 
@@ -342,26 +520,34 @@ def download_stocks(tickers):
                 ] = data.copy()
 
 
-        time.sleep(0.2)
-
-
-    missing = [
-        ticker
-        for ticker in tickers
-        if ticker not in all_stock_data
-    ]
+        time.sleep(
+            0.2
+        )
 
 
     # ========================================================
     # RETRY MISSING INDIVIDUALLY
     # ========================================================
 
+    missing = [
+        ticker
+
+        for ticker
+        in tickers
+
+        if ticker
+        not in all_stock_data
+    ]
+
+
     if missing:
 
         print()
 
         print(
-            f"Retrying {len(missing)} missing tickers..."
+            f"Retrying "
+            f"{len(missing)} "
+            f"missing tickers..."
         )
 
 
@@ -379,6 +565,7 @@ def download_stocks(tickers):
                 threads=False
             )
 
+
             if isinstance(
                 df.columns,
                 pd.MultiIndex
@@ -389,11 +576,13 @@ def download_stocks(tickers):
                     .get_level_values(0)
                 )
 
+
             if not df.empty:
 
                 all_stock_data[
                     ticker
                 ] = df
+
 
         except Exception as e:
 
@@ -406,59 +595,91 @@ def download_stocks(tickers):
 
 
 # ============================================================
-# MARKET FUNCTIONS
+# MARKET HELPERS
 # ============================================================
 
-def get_market_row(df, date):
+def get_market_row(
+    df,
+    date
+):
 
     available = df[
         df.index <= date
     ]
 
+
     if available.empty:
+
         return None
 
-    row = available.iloc[-1]
+
+    row = (
+        available
+        .iloc[-1]
+    )
+
 
     if pd.isna(
         row["SMA200"]
     ):
+
         return None
+
 
     return row
 
 
-def above_sma200(df, date):
+def above_sma200(
+    df,
+    date
+):
 
     row = get_market_row(
         df,
         date
     )
 
+
     if row is None:
+
         return False
 
+
     return (
-        float(row["Close"])
+        float(
+            row["Close"]
+        )
         >
-        float(row["SMA200"])
+        float(
+            row["SMA200"]
+        )
     )
 
 
-def below_sma200(df, date):
+def below_sma200(
+    df,
+    date
+):
 
     row = get_market_row(
         df,
         date
     )
 
+
     if row is None:
+
         return False
 
+
     return (
-        float(row["Close"])
+        float(
+            row["Close"]
+        )
         <
-        float(row["SMA200"])
+        float(
+            row["SMA200"]
+        )
     )
 
 
@@ -485,36 +706,60 @@ def market_allows_long(
 # STRONG TREND
 # ============================================================
 
-def strong_trend(df, i):
+def strong_trend(
+    df,
+    i
+):
 
     if i < 10:
+
         return False
 
-    row = df.iloc[i]
+
+    row = (
+        df.iloc[i]
+    )
+
 
     return (
-        float(row["Close"])
-        >
-        float(row["SMA200"])
-
-        and
-
-        float(row["SMA50"])
-        >
-        float(row["SMA200"])
-
-        and
-
-        float(row["EMA20"])
-        >
-        float(row["SMA50"])
-
-        and
-
-        float(row["SMA50"])
+        float(
+            row["Close"]
+        )
         >
         float(
-            df["SMA50"].iloc[
+            row["SMA200"]
+        )
+
+        and
+
+        float(
+            row["SMA50"]
+        )
+        >
+        float(
+            row["SMA200"]
+        )
+
+        and
+
+        float(
+            row["EMA20"]
+        )
+        >
+        float(
+            row["SMA50"]
+        )
+
+        and
+
+        float(
+            row["SMA50"]
+        )
+        >
+        float(
+            df[
+                "SMA50"
+            ].iloc[
                 i - 10
             ]
         )
@@ -522,19 +767,26 @@ def strong_trend(df, i):
 
 
 # ============================================================
-# SETUP
+# PULLBACK SETUP
 # ============================================================
 
-def pullback_setup(df, i):
+def pullback_setup(
+    df,
+    i
+):
 
     if not strong_trend(
         df,
         i
     ):
+
         return None
 
 
-    row = df.iloc[i]
+    row = (
+        df.iloc[i]
+    )
+
 
     close = float(
         row["Close"]
@@ -574,17 +826,20 @@ def pullback_setup(df, i):
 
 
     # ========================================================
-    # PULLBACK TO EMA20
+    # EMA20 PULLBACK
     # ========================================================
 
     ema_distance = (
         abs(
-            low - ema20
+            low
+            - ema20
         )
         / atr
     )
 
+
     if ema_distance > 0.50:
+
         return None
 
 
@@ -593,6 +848,7 @@ def pullback_setup(df, i):
     # ========================================================
 
     if close <= ema20:
+
         return None
 
 
@@ -601,6 +857,7 @@ def pullback_setup(df, i):
     # ========================================================
 
     if close <= open_price:
+
         return None
 
 
@@ -609,17 +866,24 @@ def pullback_setup(df, i):
     # ========================================================
 
     candle_range = (
-        high - low
+        high
+        - low
     )
 
+
     if candle_range <= 0:
+
         return None
 
+
     close_location = (
-        close - low
+        close
+        - low
     ) / candle_range
 
+
     if close_location < 0.60:
+
         return None
 
 
@@ -628,50 +892,70 @@ def pullback_setup(df, i):
     # ========================================================
 
     if avg_volume <= 0:
+
         return None
+
 
     relative_volume = (
         volume
         / avg_volume
     )
 
+
     if relative_volume < REL_VOLUME_MIN:
+
         return None
 
 
     # ========================================================
-    # ENTRY + STOP
+    # ENTRY
     # ========================================================
 
     trigger = (
         high
-        + 0.05 * atr
+        + 0.05
+        * atr
     )
+
+
+    # ========================================================
+    # STOP
+    # ========================================================
 
     stop = (
         min(
             low,
             low5
         )
-        - 0.10 * atr
+        - 0.10
+        * atr
     )
 
+
     risk = (
-        trigger - stop
+        trigger
+        - stop
     )
 
 
     if risk <= 0:
+
         return None
+
 
     if risk < (
-        0.50 * atr
+        0.50
+        * atr
     ):
+
         return None
 
+
     if risk > (
-        3.0 * atr
+        3.0
+        * atr
     ):
+
         return None
 
 
@@ -694,7 +978,7 @@ def pullback_setup(df, i):
 
 
 # ============================================================
-# ENTRY
+# FIND ENTRY
 # ============================================================
 
 def find_entry(
@@ -706,8 +990,11 @@ def find_entry(
     end = min(
         signal_index
         + ENTRY_VALID_DAYS,
-        len(df) - 1
+
+        len(df)
+        - 1
     )
+
 
     for i in range(
         signal_index + 1,
@@ -715,10 +1002,13 @@ def find_entry(
     ):
 
         if float(
-            df["High"].iloc[i]
+            df[
+                "High"
+            ].iloc[i]
         ) >= trigger:
 
             return i
+
 
     return None
 
@@ -735,16 +1025,23 @@ def simulate_trade(
 ):
 
     entry_open = float(
-        df["Open"].iloc[
+        df[
+            "Open"
+        ].iloc[
             entry_index
         ]
     )
+
 
     raw_entry = max(
         trigger,
         entry_open
     )
 
+
+    # ========================================================
+    # ENTRY EXECUTION
+    # ========================================================
 
     entry_fill = (
         raw_entry
@@ -754,6 +1051,7 @@ def simulate_trade(
         )
     )
 
+
     stop_reference = (
         initial_stop
         * (
@@ -762,25 +1060,40 @@ def simulate_trade(
         )
     )
 
+
     risk_per_share = (
         entry_fill
         - stop_reference
     )
 
+
     if risk_per_share <= 0:
+
         return None
 
+
+    # ========================================================
+    # EXIT SEARCH
+    # ========================================================
 
     end = min(
         entry_index
         + TRAIL_HOLD_DAYS
         - 1,
-        len(df) - 1
+
+        len(df)
+        - 1
     )
 
 
-    trail = initial_stop
-    highest_close = raw_entry
+    trail = (
+        initial_stop
+    )
+
+
+    highest_close = (
+        raw_entry
+    )
 
 
     for i in range(
@@ -788,7 +1101,10 @@ def simulate_trade(
         end + 1
     ):
 
-        row = df.iloc[i]
+        row = (
+            df.iloc[i]
+        )
+
 
         open_price = float(
             row["Open"]
@@ -814,28 +1130,47 @@ def simulate_trade(
             * atr
         )
 
+
         trail = max(
             trail,
             calculated_trail
         )
 
 
-        # GAP
+        # ====================================================
+        # GAP THROUGH TRAIL
+        # ====================================================
+
         if open_price < trail:
 
-            raw_exit = open_price
+            raw_exit = (
+                open_price
+            )
+
             exit_index = i
-            exit_reason = "ATR_GAP"
+
+            exit_reason = (
+                "ATR_GAP"
+            )
 
             break
 
 
-        # STOP
+        # ====================================================
+        # INTRADAY TRAIL HIT
+        # ====================================================
+
         if low <= trail:
 
-            raw_exit = trail
+            raw_exit = (
+                trail
+            )
+
             exit_index = i
-            exit_reason = "ATR_TRAIL"
+
+            exit_reason = (
+                "ATR_TRAIL"
+            )
 
             break
 
@@ -848,16 +1183,28 @@ def simulate_trade(
 
     else:
 
-        exit_index = end
+        exit_index = (
+            end
+        )
+
 
         raw_exit = float(
-            df["Close"].iloc[
+            df[
+                "Close"
+            ].iloc[
                 exit_index
             ]
         )
 
-        exit_reason = "TIME30"
 
+        exit_reason = (
+            "TIME30"
+        )
+
+
+    # ========================================================
+    # EXIT EXECUTION
+    # ========================================================
 
     exit_fill = (
         raw_exit
@@ -875,6 +1222,7 @@ def simulate_trade(
             + COMMISSION_PCT
         )
     )
+
 
     exit_proceeds_per_share = (
         exit_fill
@@ -928,7 +1276,7 @@ def simulate_trade(
 
 
 # ============================================================
-# GENERATE ALL SIGNALS
+# GENERATE EVERY VALID SIGNAL
 # ============================================================
 
 def generate_all_trades(
@@ -944,6 +1292,7 @@ def generate_all_trades(
 ):
 
     trades = []
+
 
     diagnostics = {
         "Stocks":
@@ -987,15 +1336,19 @@ def generate_all_trades(
     ):
 
         if ticker not in prepared_data:
+
             continue
 
 
-        df = prepared_data[
-            ticker
-        ]
+        df = (
+            prepared_data[
+                ticker
+            ]
+        )
 
 
         if len(df) < 250:
+
             continue
 
 
@@ -1004,10 +1357,14 @@ def generate_all_trades(
         ] += 1
 
 
-        if number % 25 == 0:
+        if (
+            number % 25
+            == 0
+        ):
 
             print(
-                f"{number}/{len(tickers)}"
+                f"{number}/"
+                f"{len(tickers)}"
             )
 
 
@@ -1018,16 +1375,20 @@ def generate_all_trades(
             - 1
         ):
 
-            signal_date = pd.Timestamp(
-                df.index[i]
+            signal_date = (
+                pd.Timestamp(
+                    df.index[i]
+                )
             )
 
 
             if signal_date < backtest_start:
+
                 continue
 
 
             if signal_date > end_date:
+
                 break
 
 
@@ -1043,9 +1404,13 @@ def generate_all_trades(
 
             if any(
                 pd.isna(
-                    df[col].iloc[i]
+                    df[
+                        col
+                    ].iloc[i]
                 )
-                for col in required
+
+                for col
+                in required
             ):
 
                 continue
@@ -1063,6 +1428,7 @@ def generate_all_trades(
 
 
             if setup is None:
+
                 continue
 
 
@@ -1072,11 +1438,16 @@ def generate_all_trades(
 
 
             trigger = float(
-                setup["Trigger"]
+                setup[
+                    "Trigger"
+                ]
             )
 
+
             stop = float(
-                setup["Stop"]
+                setup[
+                    "Stop"
+                ]
             )
 
 
@@ -1104,6 +1475,7 @@ def generate_all_trades(
 
 
             if entry_date > end_date:
+
                 continue
 
 
@@ -1129,6 +1501,7 @@ def generate_all_trades(
 
 
             if result is None:
+
                 continue
 
 
@@ -1205,26 +1578,37 @@ def generate_all_trades(
         )
 
 
-    return trades, diagnostics
+    return (
+        trades,
+        diagnostics
+    )
 
 
 # ============================================================
-# METRICS
+# PERFORMANCE STATS
 # ============================================================
 
-def performance_stats(trades):
+def performance_stats(
+    trades
+):
 
     if trades.empty:
+
         return {}
 
 
     positive = trades.loc[
-        trades["Net_R"] > 0,
+        trades[
+            "Net_R"
+        ] > 0,
         "Net_R"
     ]
 
+
     negative = trades.loc[
-        trades["Net_R"] < 0,
+        trades[
+            "Net_R"
+        ] < 0,
         "Net_R"
     ]
 
@@ -1235,74 +1619,113 @@ def performance_stats(trades):
         abs(
             negative.sum()
         )
+
         if abs(
             negative.sum()
         ) > 0
+
         else np.inf
     )
 
 
     start = pd.Timestamp(
-        trades["Entry_Date"].min()
+        trades[
+            "Entry_Date"
+        ].min()
     )
+
 
     end = pd.Timestamp(
-        trades["Exit_Date"].max()
+        trades[
+            "Exit_Date"
+        ].max()
     )
 
+
     years = (
-        end - start
-    ).days / 365.25
+        (
+            end
+            - start
+        ).days
+        / 365.25
+    )
 
 
     yearly = (
         trades
         .assign(
             Year=pd.to_datetime(
-                trades["Entry_Date"]
+                trades[
+                    "Entry_Date"
+                ]
             ).dt.year
         )
-        .groupby("Year")["Net_R"]
+        .groupby(
+            "Year"
+        )[
+            "Net_R"
+        ]
         .mean()
     )
 
 
     return {
         "Trades":
-            len(trades),
+            len(
+                trades
+            ),
 
         "Trades_Year":
-            len(trades) / years,
+            (
+                len(
+                    trades
+                )
+                / years
+            ),
 
         "Win_%":
             (
-                trades["Net_R"] > 0
-            ).mean() * 100,
+                trades[
+                    "Net_R"
+                ] > 0
+            ).mean()
+            * 100,
 
         "Avg_R":
-            trades["Net_R"].mean(),
+            trades[
+                "Net_R"
+            ].mean(),
 
         "Median_R":
-            trades["Net_R"].median(),
+            trades[
+                "Net_R"
+            ].median(),
 
         "PF_R":
             pf,
 
         "Total_R":
-            trades["Net_R"].sum(),
+            trades[
+                "Net_R"
+            ].sum(),
 
         "Positive_Years_%":
             (
                 yearly > 0
-            ).mean() * 100,
+            ).mean()
+            * 100,
 
         "Positive_Years":
             int(
-                (yearly > 0).sum()
+                (
+                    yearly > 0
+                ).sum()
             ),
 
         "Years":
-            len(yearly)
+            len(
+                yearly
+            )
     }
 
 
@@ -1310,13 +1733,20 @@ def performance_stats(trades):
 # YEARLY ANALYSIS
 # ============================================================
 
-def yearly_analysis(trades):
+def yearly_analysis(
+    trades
+):
 
-    df = trades.copy()
+    df = (
+        trades.copy()
+    )
+
 
     df["Year"] = (
         pd.to_datetime(
-            df["Entry_Date"]
+            df[
+                "Entry_Date"
+            ]
         )
         .dt.year
     )
@@ -1325,13 +1755,42 @@ def yearly_analysis(trades):
     rows = []
 
 
-    for year, group in df.groupby(
-        "Year"
+    for year, group in (
+        df.groupby(
+            "Year"
+        )
     ):
 
-        stats = performance_stats(
-            group
+        positive = group.loc[
+            group[
+                "Net_R"
+            ] > 0,
+            "Net_R"
+        ]
+
+
+        negative = group.loc[
+            group[
+                "Net_R"
+            ] < 0,
+            "Net_R"
+        ]
+
+
+        pf = (
+            positive.sum()
+            /
+            abs(
+                negative.sum()
+            )
+
+            if abs(
+                negative.sum()
+            ) > 0
+
+            else np.inf
         )
+
 
         rows.append(
             {
@@ -1339,31 +1798,46 @@ def yearly_analysis(trades):
                     year,
 
                 "Trades":
-                    len(group),
+                    len(
+                        group
+                    ),
 
                 "Avg_R":
-                    group["Net_R"].mean(),
+                    group[
+                        "Net_R"
+                    ].mean(),
 
                 "Median_R":
-                    group["Net_R"].median(),
+                    group[
+                        "Net_R"
+                    ].median(),
 
                 "PF_R":
-                    stats["PF_R"],
+                    pf,
 
                 "Total_R":
-                    group["Net_R"].sum(),
+                    group[
+                        "Net_R"
+                    ].sum(),
 
                 "Win_%":
                     (
-                        group["Net_R"] > 0
-                    ).mean() * 100
+                        group[
+                            "Net_R"
+                        ] > 0
+                    ).mean()
+                    * 100
             }
         )
 
 
     return (
-        pd.DataFrame(rows)
-        .set_index("Year")
+        pd.DataFrame(
+            rows
+        )
+        .set_index(
+            "Year"
+        )
     )
 
 
@@ -1371,21 +1845,52 @@ def yearly_analysis(trades):
 # SECTOR ANALYSIS
 # ============================================================
 
-def sector_analysis(trades):
+def sector_analysis(
+    trades
+):
 
     rows = []
 
 
     for sector, group in (
-        trades.groupby("Sector")
+        trades.groupby(
+            "Sector"
+        )
     ):
 
         if len(group) < 10:
+
             continue
 
 
-        stats = performance_stats(
-            group
+        positive = group.loc[
+            group[
+                "Net_R"
+            ] > 0,
+            "Net_R"
+        ]
+
+
+        negative = group.loc[
+            group[
+                "Net_R"
+            ] < 0,
+            "Net_R"
+        ]
+
+
+        pf = (
+            positive.sum()
+            /
+            abs(
+                negative.sum()
+            )
+
+            if abs(
+                negative.sum()
+            ) > 0
+
+            else np.inf
         )
 
 
@@ -1395,24 +1900,35 @@ def sector_analysis(trades):
                     sector,
 
                 "Trades":
-                    len(group),
+                    len(
+                        group
+                    ),
 
                 "Avg_R":
-                    group["Net_R"].mean(),
+                    group[
+                        "Net_R"
+                    ].mean(),
 
                 "Median_R":
-                    group["Net_R"].median(),
+                    group[
+                        "Net_R"
+                    ].median(),
 
                 "PF_R":
-                    stats["PF_R"],
+                    pf,
 
                 "Total_R":
-                    group["Net_R"].sum(),
+                    group[
+                        "Net_R"
+                    ].sum(),
 
                 "Win_%":
                     (
-                        group["Net_R"] > 0
-                    ).mean() * 100
+                        group[
+                            "Net_R"
+                        ] > 0
+                    ).mean()
+                    * 100
             }
         )
 
@@ -1423,6 +1939,7 @@ def sector_analysis(trades):
 
 
     if result.empty:
+
         return result
 
 
@@ -1432,15 +1949,19 @@ def sector_analysis(trades):
             "Avg_R",
             ascending=False
         )
-        .set_index("Sector")
+        .set_index(
+            "Sector"
+        )
     )
 
 
 # ============================================================
-# QQQ BULL VS BEAR ANALYSIS
+# QQQ REGIME ANALYSIS
 # ============================================================
 
-def qqq_state_analysis(trades):
+def qqq_state_analysis(
+    trades
+):
 
     rows = []
 
@@ -1451,8 +1972,34 @@ def qqq_state_analysis(trades):
         )
     ):
 
-        stats = performance_stats(
-            group
+        positive = group.loc[
+            group[
+                "Net_R"
+            ] > 0,
+            "Net_R"
+        ]
+
+
+        negative = group.loc[
+            group[
+                "Net_R"
+            ] < 0,
+            "Net_R"
+        ]
+
+
+        pf = (
+            positive.sum()
+            /
+            abs(
+                negative.sum()
+            )
+
+            if abs(
+                negative.sum()
+            ) > 0
+
+            else np.inf
         )
 
 
@@ -1467,36 +2014,51 @@ def qqq_state_analysis(trades):
                     ),
 
                 "Trades":
-                    len(group),
+                    len(
+                        group
+                    ),
 
                 "Avg_R":
-                    group["Net_R"].mean(),
+                    group[
+                        "Net_R"
+                    ].mean(),
 
                 "Median_R":
-                    group["Net_R"].median(),
+                    group[
+                        "Net_R"
+                    ].median(),
 
                 "PF_R":
-                    stats["PF_R"],
+                    pf,
 
                 "Total_R":
-                    group["Net_R"].sum(),
+                    group[
+                        "Net_R"
+                    ].sum(),
 
                 "Win_%":
                     (
-                        group["Net_R"] > 0
-                    ).mean() * 100
+                        group[
+                            "Net_R"
+                        ] > 0
+                    ).mean()
+                    * 100
             }
         )
 
 
     return (
-        pd.DataFrame(rows)
-        .set_index("QQQ_State")
+        pd.DataFrame(
+            rows
+        )
+        .set_index(
+            "QQQ_State"
+        )
     )
 
 
 # ============================================================
-# SECTOR PERFORMANCE WHILE QQQ IS BEARISH
+# SECTOR PERFORMANCE WHEN QQQ BEARISH
 # ============================================================
 
 def defensive_when_qqq_bear(
@@ -1511,6 +2073,7 @@ def defensive_when_qqq_bear(
 
 
     if bear.empty:
+
         return pd.DataFrame()
 
 
@@ -1540,7 +2103,9 @@ def print_variant(
         "=" * 120
     )
 
-    print(name)
+    print(
+        name
+    )
 
     print(
         "=" * 120
@@ -1653,12 +2218,13 @@ def main():
 
 
     # ========================================================
-    # CONSTITUENTS
+    # GET S&P 500
     # ========================================================
 
-    sp500_tickers, sector_map = (
-        get_sp500_constituents()
-    )
+    (
+        sp500_tickers,
+        sector_map
+    ) = get_sp500_constituents()
 
 
     print()
@@ -1675,7 +2241,7 @@ def main():
 
 
     # ========================================================
-    # DOWNLOAD MARKETS
+    # MARKET DATA
     # ========================================================
 
     qqq = download_market(
@@ -1683,10 +2249,12 @@ def main():
         "QQQ"
     )
 
+
     spy = download_market(
         "SPY",
         "SPY"
     )
+
 
     dxy = download_market(
         "DX-Y.NYB",
@@ -1698,9 +2266,11 @@ def main():
         pd.Timestamp(
             qqq.index.max()
         ),
+
         pd.Timestamp(
             spy.index.max()
         ),
+
         pd.Timestamp(
             dxy.index.max()
         )
@@ -1710,7 +2280,8 @@ def main():
     backtest_start = (
         end_date
         - pd.DateOffset(
-            years=BACKTEST_YEARS
+            years=
+                BACKTEST_YEARS
         )
     )
 
@@ -1725,7 +2296,7 @@ def main():
 
 
     # ========================================================
-    # DOWNLOAD UNION ONCE
+    # DOWNLOAD UNION ONLY ONCE
     # ========================================================
 
     all_tickers = sorted(
@@ -1745,15 +2316,13 @@ def main():
     )
 
 
-    raw_stock_data = (
-        download_stocks(
-            all_tickers
-        )
+    raw_stock_data = download_stocks(
+        all_tickers
     )
 
 
     # ========================================================
-    # PREPARE ONCE
+    # PREPARE INDICATORS
     # ========================================================
 
     print()
@@ -1776,16 +2345,22 @@ def main():
                 df
             )
 
-            if len(prepared) >= 250:
+
+            if len(
+                prepared
+            ) >= 250:
 
                 prepared_data[
                     ticker
                 ] = prepared
 
+
         except Exception as e:
 
             print(
-                f"PREP ERROR {ticker}: {e}"
+                f"PREP ERROR "
+                f"{ticker}: "
+                f"{e}"
             )
 
 
@@ -1796,115 +2371,121 @@ def main():
 
 
     # ========================================================
-    # A - NASDAQ / QQQ
+    # A - NASDAQ + QQQ
     # ========================================================
 
-    trades_a, diag_a = (
-        generate_all_trades(
-            universe_name=
-                "NASDAQ_QQQ",
+    (
+        trades_a,
+        diag_a
+    ) = generate_all_trades(
 
-            tickers=
-                NASDAQ_TICKERS,
+        universe_name=
+            "NASDAQ_QQQ",
 
-            prepared_data=
-                prepared_data,
+        tickers=
+            NASDAQ_TICKERS,
 
-            primary_market=
-                qqq,
+        prepared_data=
+            prepared_data,
 
-            dxy=
-                dxy,
+        primary_market=
+            qqq,
 
-            qqq=
-                qqq,
+        dxy=
+            dxy,
 
-            backtest_start=
-                backtest_start,
+        qqq=
+            qqq,
 
-            end_date=
-                end_date,
+        backtest_start=
+            backtest_start,
 
-            sector_map=
-                sector_map
-        )
+        end_date=
+            end_date,
+
+        sector_map=
+            sector_map
     )
 
 
     # ========================================================
-    # B - S&P / QQQ
+    # B - S&P500 + QQQ
     # ========================================================
 
-    trades_b, diag_b = (
-        generate_all_trades(
-            universe_name=
-                "SP500_QQQ",
+    (
+        trades_b,
+        diag_b
+    ) = generate_all_trades(
 
-            tickers=
-                sp500_tickers,
+        universe_name=
+            "SP500_QQQ",
 
-            prepared_data=
-                prepared_data,
+        tickers=
+            sp500_tickers,
 
-            primary_market=
-                qqq,
+        prepared_data=
+            prepared_data,
 
-            dxy=
-                dxy,
+        primary_market=
+            qqq,
 
-            qqq=
-                qqq,
+        dxy=
+            dxy,
 
-            backtest_start=
-                backtest_start,
+        qqq=
+            qqq,
 
-            end_date=
-                end_date,
+        backtest_start=
+            backtest_start,
 
-            sector_map=
-                sector_map
-        )
+        end_date=
+            end_date,
+
+        sector_map=
+            sector_map
     )
 
 
     # ========================================================
-    # C - S&P / SPY
+    # C - S&P500 + SPY
     # ========================================================
 
-    trades_c, diag_c = (
-        generate_all_trades(
-            universe_name=
-                "SP500_SPY",
+    (
+        trades_c,
+        diag_c
+    ) = generate_all_trades(
 
-            tickers=
-                sp500_tickers,
+        universe_name=
+            "SP500_SPY",
 
-            prepared_data=
-                prepared_data,
+        tickers=
+            sp500_tickers,
 
-            primary_market=
-                spy,
+        prepared_data=
+            prepared_data,
 
-            dxy=
-                dxy,
+        primary_market=
+            spy,
 
-            qqq=
-                qqq,
+        dxy=
+            dxy,
 
-            backtest_start=
-                backtest_start,
+        qqq=
+            qqq,
 
-            end_date=
-                end_date,
+        backtest_start=
+            backtest_start,
 
-            sector_map=
-                sector_map
-        )
+        end_date=
+            end_date,
+
+        sector_map=
+            sector_map
     )
 
 
     # ========================================================
-    # PRINT RESULTS
+    # RESULTS
     # ========================================================
 
     stats_a = print_variant(
@@ -1935,20 +2516,31 @@ def main():
     comparison = pd.DataFrame(
         {
             "NASDAQ_QQQ": {
+
                 "Trades":
-                    stats_a["Trades"],
+                    stats_a[
+                        "Trades"
+                    ],
 
                 "Trades/year":
-                    stats_a["Trades_Year"],
+                    stats_a[
+                        "Trades_Year"
+                    ],
 
                 "Avg_R":
-                    stats_a["Avg_R"],
+                    stats_a[
+                        "Avg_R"
+                    ],
 
                 "PF_R":
-                    stats_a["PF_R"],
+                    stats_a[
+                        "PF_R"
+                    ],
 
                 "Win_%":
-                    stats_a["Win_%"],
+                    stats_a[
+                        "Win_%"
+                    ],
 
                 "Positive_Years_%":
                     stats_a[
@@ -1956,24 +2548,38 @@ def main():
                     ],
 
                 "Total_R":
-                    stats_a["Total_R"]
+                    stats_a[
+                        "Total_R"
+                    ]
             },
 
+
             "SP500_QQQ": {
+
                 "Trades":
-                    stats_b["Trades"],
+                    stats_b[
+                        "Trades"
+                    ],
 
                 "Trades/year":
-                    stats_b["Trades_Year"],
+                    stats_b[
+                        "Trades_Year"
+                    ],
 
                 "Avg_R":
-                    stats_b["Avg_R"],
+                    stats_b[
+                        "Avg_R"
+                    ],
 
                 "PF_R":
-                    stats_b["PF_R"],
+                    stats_b[
+                        "PF_R"
+                    ],
 
                 "Win_%":
-                    stats_b["Win_%"],
+                    stats_b[
+                        "Win_%"
+                    ],
 
                 "Positive_Years_%":
                     stats_b[
@@ -1981,24 +2587,38 @@ def main():
                     ],
 
                 "Total_R":
-                    stats_b["Total_R"]
+                    stats_b[
+                        "Total_R"
+                    ]
             },
 
+
             "SP500_SPY": {
+
                 "Trades":
-                    stats_c["Trades"],
+                    stats_c[
+                        "Trades"
+                    ],
 
                 "Trades/year":
-                    stats_c["Trades_Year"],
+                    stats_c[
+                        "Trades_Year"
+                    ],
 
                 "Avg_R":
-                    stats_c["Avg_R"],
+                    stats_c[
+                        "Avg_R"
+                    ],
 
                 "PF_R":
-                    stats_c["PF_R"],
+                    stats_c[
+                        "PF_R"
+                    ],
 
                 "Win_%":
-                    stats_c["Win_%"],
+                    stats_c[
+                        "Win_%"
+                    ],
 
                 "Positive_Years_%":
                     stats_c[
@@ -2006,7 +2626,9 @@ def main():
                     ],
 
                 "Total_R":
-                    stats_c["Total_R"]
+                    stats_c[
+                        "Total_R"
+                    ]
             }
         }
     )
@@ -2026,6 +2648,7 @@ def main():
         "=" * 120
     )
 
+
     print(
         comparison
         .round(3)
@@ -2034,7 +2657,7 @@ def main():
 
 
     # ========================================================
-    # YEARLY C
+    # YEAR BY YEAR - SP500 + SPY
     # ========================================================
 
     yearly_c = yearly_analysis(
@@ -2056,6 +2679,7 @@ def main():
         "=" * 120
     )
 
+
     print(
         yearly_c
         .round(3)
@@ -2064,7 +2688,7 @@ def main():
 
 
     # ========================================================
-    # SECTOR C
+    # SECTOR ANALYSIS
     # ========================================================
 
     sectors_c = sector_analysis(
@@ -2086,15 +2710,24 @@ def main():
         "=" * 120
     )
 
-    print(
-        sectors_c
-        .round(3)
-        .to_string()
-    )
+
+    if sectors_c.empty:
+
+        print(
+            "No sector results."
+        )
+
+    else:
+
+        print(
+            sectors_c
+            .round(3)
+            .to_string()
+        )
 
 
     # ========================================================
-    # QQQ BULL / BEAR
+    # SP500/SPY SIGNALS SPLIT BY QQQ STATE
     # ========================================================
 
     qqq_states = qqq_state_analysis(
@@ -2116,6 +2749,7 @@ def main():
         "=" * 120
     )
 
+
     print(
         qqq_states
         .round(3)
@@ -2124,13 +2758,12 @@ def main():
 
 
     # ========================================================
-    # DEFENSIVE PERFORMANCE WHEN QQQ < SMA200
+    # MOST IMPORTANT:
+    # SECTORS WHILE QQQ < SMA200
     # ========================================================
 
-    bear_sectors = (
-        defensive_when_qqq_bear(
-            trades_c
-        )
+    bear_sectors = defensive_when_qqq_bear(
+        trades_c
     )
 
 
@@ -2165,7 +2798,7 @@ def main():
 
 
     # ========================================================
-    # SAVE
+    # SAVE CSV FILES
     # ========================================================
 
     trades_a.to_csv(
@@ -2173,31 +2806,38 @@ def main():
         index=False
     )
 
+
     trades_b.to_csv(
         "v25_sp500_qqq.csv",
         index=False
     )
+
 
     trades_c.to_csv(
         "v25_sp500_spy.csv",
         index=False
     )
 
+
     comparison.to_csv(
         "v25_comparison.csv"
     )
+
 
     yearly_c.to_csv(
         "v25_sp500_spy_yearly.csv"
     )
 
+
     sectors_c.to_csv(
         "v25_sp500_spy_sectors.csv"
     )
 
+
     qqq_states.to_csv(
         "v25_qqq_regime_analysis.csv"
     )
+
 
     bear_sectors.to_csv(
         "v25_qqq_bear_sector_analysis.csv"
