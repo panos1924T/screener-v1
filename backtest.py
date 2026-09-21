@@ -1,35 +1,24 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from collections import Counter, defaultdict
 
 
 # ============================================================
-# V18 - FILTER FUNNEL / INACTIVE DAYS DIAGNOSTIC
+# V19 - NO DXY FILTER TEST
 #
 # EXACT V15/V17 STRATEGY
 #
-# NO STRATEGY PARAMETERS CHANGED.
+# ONLY CHANGE:
+#   REMOVE DXY < SMA200 FILTER
 #
-# PURPOSE:
-# Find what actually limits trading frequency:
-#
-# - QQQ regime?
-# - DXY regime?
-# - Strong trend?
-# - RSI?
-# - Stoch RSI cross?
-# - EMA20 pullback?
-# - Bullish confirmation?
-# - Relative volume?
-# - Stop/risk requirement?
-# - Entry trigger?
+# KEEP:
+#   QQQ > SMA200
 #
 # ============================================================
 
 
 # ============================================================
-# ACCOUNT / STRATEGY
+# ACCOUNT
 # ============================================================
 
 STARTING_CAPITAL = 1000.0
@@ -43,6 +32,11 @@ SLIPPAGE_PCT = 0.0005
 COMMISSION_PCT = 0.0002
 
 MIN_SHARE_SIZE = 0.0001
+
+
+# ============================================================
+# STRATEGY
+# ============================================================
 
 DOWNLOAD_PERIOD = "max"
 
@@ -118,7 +112,10 @@ def calculate_rsi(series, period=14):
     )
 
 
-def calculate_stoch_rsi(rsi, period=14):
+def calculate_stoch_rsi(
+    rsi,
+    period=14
+):
 
     lowest = (
         rsi
@@ -147,7 +144,10 @@ def calculate_stoch_rsi(rsi, period=14):
     ) * 100
 
 
-def calculate_atr(df, period=14):
+def calculate_atr(
+    df,
+    period=14
+):
 
     previous_close = (
         df["Close"]
@@ -217,18 +217,24 @@ def prepare_stock(df):
         .mean()
     )
 
-    df["ATR14"] = calculate_atr(
-        df,
-        ATR_PERIOD
+    df["ATR14"] = (
+        calculate_atr(
+            df,
+            ATR_PERIOD
+        )
     )
 
-    df["RSI14"] = calculate_rsi(
-        df["Close"]
+    df["RSI14"] = (
+        calculate_rsi(
+            df["Close"]
+        )
     )
 
-    df["STOCH_RSI"] = calculate_stoch_rsi(
-        df["RSI14"],
-        STOCH_RSI_PERIOD
+    df["STOCH_RSI"] = (
+        calculate_stoch_rsi(
+            df["RSI14"],
+            STOCH_RSI_PERIOD
+        )
     )
 
     df["AVG_VOL20"] = (
@@ -248,10 +254,13 @@ def prepare_stock(df):
 
 
 # ============================================================
-# MARKET
+# QQQ MARKET FILTER ONLY
 # ============================================================
 
-def download_market(ticker, name):
+def download_market(
+    ticker,
+    name
+):
 
     print(
         f"Downloading {name}..."
@@ -295,18 +304,20 @@ def download_market(ticker, name):
     return df
 
 
-def get_market_row(
-    df,
+def qqq_allows_long(
+    qqq,
     date
 ):
 
-    available = df[
-        df.index <= date
-    ]
+    available = (
+        qqq[
+            qqq.index <= date
+        ]
+    )
 
     if available.empty:
 
-        return None
+        return False
 
     row = (
         available.iloc[-1]
@@ -316,79 +327,16 @@ def get_market_row(
         row["SMA200"]
     ):
 
-        return None
+        return False
 
-    return row
-
-
-def market_status(
-    qqq,
-    dxy,
-    date
-):
-
-    qqq_row = get_market_row(
-        qqq,
-        date
-    )
-
-    dxy_row = get_market_row(
-        dxy,
-        date
-    )
-
-    if (
-        qqq_row is None
-        or
-        dxy_row is None
-    ):
-
-        return None, None
-
-    qqq_ok = (
+    return (
         float(
-            qqq_row["Close"]
+            row["Close"]
         )
         >
         float(
-            qqq_row["SMA200"]
+            row["SMA200"]
         )
-    )
-
-    dxy_ok = (
-        float(
-            dxy_row["Close"]
-        )
-        <
-        float(
-            dxy_row["SMA200"]
-        )
-    )
-
-    return (
-        qqq_ok,
-        dxy_ok
-    )
-
-
-def market_allows_long(
-    qqq,
-    dxy,
-    date
-):
-
-    qqq_ok, dxy_ok = (
-        market_status(
-            qqq,
-            dxy,
-            date
-        )
-    )
-
-    return (
-        qqq_ok is True
-        and
-        dxy_ok is True
     )
 
 
@@ -420,7 +368,8 @@ def strong_trend(
     )
 
     old_sma50 = float(
-        df["SMA50"].iloc[
+        df["SMA50"]
+        .iloc[
             i - 10
         ]
     )
@@ -447,29 +396,53 @@ def quality_score(
 
     row = df.iloc[i]
 
-    close = float(row["Close"])
-    high = float(row["High"])
-    low = float(row["Low"])
+    close = float(
+        row["Close"]
+    )
 
-    sma50 = float(row["SMA50"])
-    ema20 = float(row["EMA20"])
-    atr = float(row["ATR14"])
+    high = float(
+        row["High"]
+    )
 
-    volume = float(row["Volume"])
-    avg_volume = float(row["AVG_VOL20"])
+    low = float(
+        row["Low"]
+    )
+
+    sma50 = float(
+        row["SMA50"]
+    )
+
+    ema20 = float(
+        row["EMA20"]
+    )
+
+    atr = float(
+        row["ATR14"]
+    )
+
+    volume = float(
+        row["Volume"]
+    )
+
+    avg_volume = float(
+        row["AVG_VOL20"]
+    )
 
     old_sma50 = float(
-        df["SMA50"].iloc[
+        df["SMA50"]
+        .iloc[
             i - 10
         ]
     )
 
     slope = (
-        sma50 - old_sma50
+        sma50
+        - old_sma50
     ) / atr
 
     ema_strength = (
-        ema20 - sma50
+        ema20
+        - sma50
     ) / atr
 
     candle_range = (
@@ -505,7 +478,7 @@ def quality_score(
 
 
 # ============================================================
-# EXACT SETUP
+# PULLBACK SETUP
 # ============================================================
 
 def pullback_setup(
@@ -522,27 +495,53 @@ def pullback_setup(
 
     row = df.iloc[i]
 
-    close = float(row["Close"])
-    open_price = float(row["Open"])
+    close = float(
+        row["Close"]
+    )
 
-    high = float(row["High"])
-    low = float(row["Low"])
+    open_price = float(
+        row["Open"]
+    )
 
-    ema20 = float(row["EMA20"])
-    atr = float(row["ATR14"])
-    rsi = float(row["RSI14"])
+    high = float(
+        row["High"]
+    )
 
-    volume = float(row["Volume"])
-    avg_volume = float(row["AVG_VOL20"])
+    low = float(
+        row["Low"]
+    )
 
-    low5 = float(row["LOW5"])
+    ema20 = float(
+        row["EMA20"]
+    )
+
+    atr = float(
+        row["ATR14"]
+    )
+
+    rsi = float(
+        row["RSI14"]
+    )
+
+    volume = float(
+        row["Volume"]
+    )
+
+    avg_volume = float(
+        row["AVG_VOL20"]
+    )
+
+    low5 = float(
+        row["LOW5"]
+    )
 
     stoch = float(
         row["STOCH_RSI"]
     )
 
     previous_stoch = float(
-        df["STOCH_RSI"].iloc[
+        df["STOCH_RSI"]
+        .iloc[
             i - 1
         ]
     )
@@ -561,13 +560,15 @@ def pullback_setup(
 
         return None
 
-    if not (
+    crossed = (
         previous_stoch
         <= STOCH_CROSS_LEVEL
         and
         stoch
         > STOCH_CROSS_LEVEL
-    ):
+    )
+
+    if not crossed:
 
         return None
 
@@ -688,7 +689,8 @@ def find_entry(
     ):
 
         if float(
-            df["High"].iloc[i]
+            df["High"]
+            .iloc[i]
         ) >= trigger:
 
             return i
@@ -697,615 +699,634 @@ def find_entry(
 
 
 # ============================================================
-# ============================================================
-#
-# DIAGNOSTIC FUNNEL
-#
-# IMPORTANT:
-#
-# This scans every usable stock/day independently.
-#
-# It DOES NOT change the actual strategy.
-#
-# ============================================================
+# BASELINE LIFECYCLE
 # ============================================================
 
-FUNNEL_STAGES = [
-    "USABLE_DATA",
-    "STRONG_TREND",
-    "RSI",
-    "STOCH_CROSS",
-    "EMA_PULLBACK",
-    "CLOSE_ABOVE_EMA",
-    "BULLISH_CANDLE",
-    "CLOSE_LOCATION",
-    "REL_VOLUME",
-    "VALID_RISK",
-    "TRIGGERED",
-    "MARKET_REGIME"
-]
-
-
-def diagnose_stock_day(
+def simulate_baseline_lifecycle(
     df,
-    i
+    entry_index,
+    trigger,
+    stop
 ):
 
-    """
-    Returns:
-        passed_stages
-        first_failure
-        trigger
-    """
-
-    passed = []
-
-    row = df.iloc[i]
-
-    required = [
-        "SMA200",
-        "SMA50",
-        "EMA20",
-        "ATR14",
-        "RSI14",
-        "STOCH_RSI",
-        "AVG_VOL20",
-        "LOW5"
-    ]
-
-    if any(
-        pd.isna(
-            row[col]
-        )
-        for col in required
-    ):
-
-        return (
-            passed,
-            "MISSING_DATA",
-            None
-        )
-
-    if i < 10:
-
-        return (
-            passed,
-            "MISSING_DATA",
-            None
-        )
-
-    previous_stoch = (
-        df["STOCH_RSI"]
+    entry_open = float(
+        df["Open"]
         .iloc[
-            i - 1
+            entry_index
         ]
     )
 
-    if pd.isna(
-        previous_stoch
-    ):
-
-        return (
-            passed,
-            "MISSING_DATA",
-            None
-        )
-
-    passed.append(
-        "USABLE_DATA"
-    )
-
-
-    # ========================================================
-    # STRONG TREND
-    # ========================================================
-
-    if not strong_trend(
-        df,
-        i
-    ):
-
-        return (
-            passed,
-            "STRONG_TREND",
-            None
-        )
-
-    passed.append(
-        "STRONG_TREND"
-    )
-
-
-    # ========================================================
-    # VALUES
-    # ========================================================
-
-    close = float(
-        row["Close"]
-    )
-
-    open_price = float(
-        row["Open"]
-    )
-
-    high = float(
-        row["High"]
-    )
-
-    low = float(
-        row["Low"]
-    )
-
-    ema20 = float(
-        row["EMA20"]
-    )
-
-    atr = float(
-        row["ATR14"]
-    )
-
-    rsi = float(
-        row["RSI14"]
-    )
-
-    stoch = float(
-        row["STOCH_RSI"]
-    )
-
-    volume = float(
-        row["Volume"]
-    )
-
-    avg_volume = float(
-        row["AVG_VOL20"]
-    )
-
-    low5 = float(
-        row["LOW5"]
-    )
-
-
-    # ========================================================
-    # RSI
-    # ========================================================
-
-    if not (
-        45 <= rsi <= 65
-    ):
-
-        return (
-            passed,
-            "RSI",
-            None
-        )
-
-    passed.append(
-        "RSI"
-    )
-
-
-    # ========================================================
-    # STOCH RSI CROSS
-    # ========================================================
-
-    crossed = (
-        float(
-            previous_stoch
-        )
-        <= STOCH_CROSS_LEVEL
-        and
-        stoch
-        > STOCH_CROSS_LEVEL
-    )
-
-    if not crossed:
-
-        return (
-            passed,
-            "STOCH_CROSS",
-            None
-        )
-
-    passed.append(
-        "STOCH_CROSS"
-    )
-
-
-    # ========================================================
-    # EMA PULLBACK
-    # ========================================================
-
-    ema_distance = (
-        abs(
-            low - ema20
-        )
-        / atr
-    )
-
-    if ema_distance > 0.50:
-
-        return (
-            passed,
-            "EMA_PULLBACK",
-            None
-        )
-
-    passed.append(
-        "EMA_PULLBACK"
-    )
-
-
-    # ========================================================
-    # CLOSE ABOVE EMA
-    # ========================================================
-
-    if close <= ema20:
-
-        return (
-            passed,
-            "CLOSE_ABOVE_EMA",
-            None
-        )
-
-    passed.append(
-        "CLOSE_ABOVE_EMA"
-    )
-
-
-    # ========================================================
-    # BULLISH CANDLE
-    # ========================================================
-
-    if close <= open_price:
-
-        return (
-            passed,
-            "BULLISH_CANDLE",
-            None
-        )
-
-    passed.append(
-        "BULLISH_CANDLE"
-    )
-
-
-    # ========================================================
-    # CLOSE LOCATION
-    # ========================================================
-
-    candle_range = (
-        high - low
-    )
-
-    if candle_range <= 0:
-
-        return (
-            passed,
-            "CLOSE_LOCATION",
-            None
-        )
-
-    close_location = (
-        close - low
-    ) / candle_range
-
-    if close_location < 0.60:
-
-        return (
-            passed,
-            "CLOSE_LOCATION",
-            None
-        )
-
-    passed.append(
-        "CLOSE_LOCATION"
-    )
-
-
-    # ========================================================
-    # RELATIVE VOLUME
-    # ========================================================
-
-    if avg_volume <= 0:
-
-        return (
-            passed,
-            "REL_VOLUME",
-            None
-        )
-
-    relative_volume = (
-        volume
-        / avg_volume
-    )
-
-    if relative_volume < 0.80:
-
-        return (
-            passed,
-            "REL_VOLUME",
-            None
-        )
-
-    passed.append(
-        "REL_VOLUME"
-    )
-
-
-    # ========================================================
-    # STOP / RISK
-    # ========================================================
-
-    trigger = (
-        high
-        + 0.05 * atr
-    )
-
-    stop = (
-        min(
-            low,
-            low5
-        )
-        - 0.10 * atr
+    raw_entry = max(
+        trigger,
+        entry_open
     )
 
     risk = (
-        trigger - stop
+        raw_entry
+        - stop
     )
 
-    if (
-        risk <= 0
-        or
-        risk < (
-            0.50 * atr
-        )
-        or
-        risk > (
-            3.0 * atr
-        )
+    if risk <= 0:
+
+        return None
+
+    target = (
+        raw_entry
+        + 2.0 * risk
+    )
+
+    end = min(
+        entry_index
+        + FIXED_HOLD_DAYS
+        - 1,
+        len(df) - 1
+    )
+
+    for i in range(
+        entry_index,
+        end + 1
     ):
 
-        return (
-            passed,
-            "VALID_RISK",
-            None
+        row = df.iloc[i]
+
+        open_price = float(
+            row["Open"]
         )
 
-    passed.append(
-        "VALID_RISK"
-    )
+        high = float(
+            row["High"]
+        )
 
-    return (
-        passed,
-        None,
-        trigger
-    )
+        low = float(
+            row["Low"]
+        )
 
+        if open_price < stop:
 
-# ============================================================
-# RUN FULL FILTER DIAGNOSTIC
-# ============================================================
+            return {
+                "Raw_Entry":
+                    raw_entry,
 
-def run_filter_diagnostic(
-    prepared_data,
-    qqq,
-    dxy,
-    backtest_start,
-    end_date
-):
+                "Exit_Index":
+                    i
+            }
 
-    stage_counts = Counter()
+        if low <= stop:
 
-    fail_counts = Counter()
+            return {
+                "Raw_Entry":
+                    raw_entry,
 
-    stage_dates = defaultdict(
-        set
-    )
+                "Exit_Index":
+                    i
+            }
 
-    trigger_count = 0
+        if high >= target:
 
-    trigger_dates = set()
+            return {
+                "Raw_Entry":
+                    raw_entry,
 
-    regime_pass_count = 0
-
-    regime_pass_dates = set()
-
-    market_rejected_entries = 0
-
-    market_rejected_dates = set()
-
-
-    for ticker, df in (
-        prepared_data.items()
-    ):
-
-        if len(df) < 250:
-
-            continue
-
-        for i in range(
-            210,
-            len(df) - 1
-        ):
-
-            date = pd.Timestamp(
-                df.index[i]
-            )
-
-            if (
-                date < backtest_start
-                or
-                date > end_date
-            ):
-
-                continue
-
-            (
-                passed,
-                first_failure,
-                trigger
-            ) = diagnose_stock_day(
-                df,
-                i
-            )
-
-            for stage in passed:
-
-                stage_counts[
-                    stage
-                ] += 1
-
-                stage_dates[
-                    stage
-                ].add(
-                    date
-                )
-
-            if first_failure is not None:
-
-                fail_counts[
-                    first_failure
-                ] += 1
-
-                continue
-
-
-            # =================================================
-            # Valid setup exists.
-            # Now check actual trigger within 3 days.
-            # =================================================
-
-            entry_index = find_entry(
-                df,
-                i,
-                trigger
-            )
-
-            if entry_index is None:
-
-                fail_counts[
-                    "ENTRY_TRIGGER"
-                ] += 1
-
-                continue
-
-
-            trigger_count += 1
-
-            stage_counts[
-                "TRIGGERED"
-            ] += 1
-
-            entry_date = pd.Timestamp(
-                df.index[
-                    entry_index
-                ]
-            )
-
-            trigger_dates.add(
-                entry_date
-            )
-
-            stage_dates[
-                "TRIGGERED"
-            ].add(
-                entry_date
-            )
-
-
-            # =================================================
-            # EXACT MARKET FILTER AT ENTRY
-            # =================================================
-
-            if market_allows_long(
-                qqq,
-                dxy,
-                entry_date
-            ):
-
-                regime_pass_count += 1
-
-                stage_counts[
-                    "MARKET_REGIME"
-                ] += 1
-
-                regime_pass_dates.add(
-                    entry_date
-                )
-
-                stage_dates[
-                    "MARKET_REGIME"
-                ].add(
-                    entry_date
-                )
-
-            else:
-
-                fail_counts[
-                    "MARKET_REGIME"
-                ] += 1
-
-                market_rejected_entries += 1
-
-                market_rejected_dates.add(
-                    entry_date
-                )
-
+                "Exit_Index":
+                    i
+            }
 
     return {
-        "Stage_Counts":
-            stage_counts,
+        "Raw_Entry":
+            raw_entry,
 
-        "Fail_Counts":
-            fail_counts,
-
-        "Stage_Dates":
-            stage_dates,
-
-        "Trigger_Count":
-            trigger_count,
-
-        "Trigger_Dates":
-            trigger_dates,
-
-        "Regime_Pass_Count":
-            regime_pass_count,
-
-        "Regime_Pass_Dates":
-            regime_pass_dates,
-
-        "Market_Rejected":
-            market_rejected_entries,
-
-        "Market_Rejected_Dates":
-            market_rejected_dates
+        "Exit_Index":
+            end
     }
 
 
 # ============================================================
-# MARKET REGIME DIAGNOSTIC
+# GENERATE CANDIDATES
 # ============================================================
 
-def analyze_market_regime(
+def generate_candidates(
+    all_data,
     qqq,
-    dxy,
-    backtest_start,
-    end_date
+    backtest_start
 ):
 
-    calendar = qqq.loc[
-        (
-            qqq.index >= backtest_start
-        )
-        &
-        (
-            qqq.index <= end_date
-        )
-    ].index
+    candidates = []
 
-    counts = Counter()
+    raw_signals = 0
 
-    rows = []
+    rejected_qqq = 0
+
+    for ticker in TICKERS:
+
+        try:
+
+            if (
+                ticker
+                not in
+                all_data.columns
+                .get_level_values(0)
+            ):
+
+                continue
+
+            df = prepare_stock(
+                all_data[
+                    ticker
+                ].copy()
+            )
+
+            if len(df) < 250:
+
+                continue
+
+            i = 210
+
+            while i < len(df) - 1:
+
+                signal_date = (
+                    pd.Timestamp(
+                        df.index[i]
+                    )
+                )
+
+                if signal_date < backtest_start:
+
+                    i += 1
+                    continue
+
+                required = [
+                    "SMA200",
+                    "SMA50",
+                    "EMA20",
+                    "ATR14",
+                    "RSI14",
+                    "STOCH_RSI",
+                    "AVG_VOL20",
+                    "LOW5"
+                ]
+
+                if any(
+                    pd.isna(
+                        df[col]
+                        .iloc[i]
+                    )
+                    for col
+                    in required
+                ):
+
+                    i += 1
+                    continue
+
+                setup = pullback_setup(
+                    df,
+                    i
+                )
+
+                if setup is None:
+
+                    i += 1
+                    continue
+
+                raw_signals += 1
+
+                trigger = float(
+                    setup[
+                        "Trigger"
+                    ]
+                )
+
+                stop = float(
+                    setup[
+                        "Stop"
+                    ]
+                )
+
+                entry_index = find_entry(
+                    df,
+                    i,
+                    trigger
+                )
+
+                if entry_index is None:
+
+                    i += (
+                        ENTRY_VALID_DAYS
+                        + 1
+                    )
+
+                    continue
+
+                entry_date = (
+                    pd.Timestamp(
+                        df.index[
+                            entry_index
+                        ]
+                    )
+                )
+
+                # =================================================
+                # ONLY QQQ FILTER
+                # =================================================
+
+                if not qqq_allows_long(
+                    qqq,
+                    entry_date
+                ):
+
+                    rejected_qqq += 1
+
+                    i = (
+                        entry_index
+                        + 1
+                    )
+
+                    continue
+
+                baseline = (
+                    simulate_baseline_lifecycle(
+                        df,
+                        entry_index,
+                        trigger,
+                        stop
+                    )
+                )
+
+                if baseline is None:
+
+                    i += 1
+                    continue
+
+                baseline_exit_index = int(
+                    baseline[
+                        "Exit_Index"
+                    ]
+                )
+
+                candidates.append(
+                    {
+                        "Ticker":
+                            ticker,
+
+                        "Signal_Date":
+                            signal_date,
+
+                        "Entry_Date":
+                            entry_date,
+
+                        "Entry_Index":
+                            entry_index,
+
+                        "Raw_Entry":
+                            baseline[
+                                "Raw_Entry"
+                            ],
+
+                        "Initial_Stop":
+                            stop,
+
+                        "Score":
+                            float(
+                                setup[
+                                    "Score"
+                                ]
+                            )
+                    }
+                )
+
+                i = (
+                    baseline_exit_index
+                    + 1
+                )
+
+        except Exception as e:
+
+            print(
+                f"ERROR {ticker}: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    result = pd.DataFrame(
+        candidates
+    )
+
+    if not result.empty:
+
+        result = (
+            result
+            .sort_values(
+                [
+                    "Entry_Date",
+                    "Score"
+                ],
+                ascending=[
+                    True,
+                    False
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    return (
+        result,
+        {
+            "Raw_Signals":
+                raw_signals,
+
+            "Rejected_QQQ":
+                rejected_qqq
+        }
+    )
+
+
+# ============================================================
+# EXIT PLAN
+# ============================================================
+
+def create_exit_plan(
+    df,
+    trade
+):
+
+    entry_index = int(
+        trade[
+            "Entry_Index"
+        ]
+    )
+
+    raw_entry = float(
+        trade[
+            "Raw_Entry"
+        ]
+    )
+
+    initial_stop = float(
+        trade[
+            "Initial_Stop"
+        ]
+    )
+
+    end = min(
+        entry_index
+        + TRAIL_HOLD_DAYS
+        - 1,
+        len(df) - 1
+    )
+
+    trail = initial_stop
+
+    highest_close = raw_entry
+
+    for i in range(
+        entry_index,
+        end + 1
+    ):
+
+        row = df.iloc[i]
+
+        open_price = float(
+            row["Open"]
+        )
+
+        low = float(
+            row["Low"]
+        )
+
+        close = float(
+            row["Close"]
+        )
+
+        atr = float(
+            row["ATR14"]
+        )
+
+        calculated_trail = (
+            highest_close
+            - ATR_TRAIL_MULT
+            * atr
+        )
+
+        trail = max(
+            trail,
+            calculated_trail
+        )
+
+        if open_price < trail:
+
+            return {
+                "Exit_Index":
+                    i,
+
+                "Raw_Exit":
+                    open_price,
+
+                "Exit_Reason":
+                    "ATR_GAP"
+            }
+
+        if low <= trail:
+
+            return {
+                "Exit_Index":
+                    i,
+
+                "Raw_Exit":
+                    trail,
+
+                "Exit_Reason":
+                    "ATR_TRAIL"
+            }
+
+        highest_close = max(
+            highest_close,
+            close
+        )
+
+    return {
+        "Exit_Index":
+            end,
+
+        "Raw_Exit":
+            float(
+                df["Close"]
+                .iloc[
+                    end
+                ]
+            ),
+
+        "Exit_Reason":
+            "TIME30"
+    }
+
+
+# ============================================================
+# CREATE PLANS
+# ============================================================
+
+def create_trade_plans(
+    candidates,
+    prepared_data
+):
+
+    plans = []
+
+    for _, trade in (
+        candidates.iterrows()
+    ):
+
+        ticker = (
+            trade[
+                "Ticker"
+            ]
+        )
+
+        if ticker not in prepared_data:
+
+            continue
+
+        df = (
+            prepared_data[
+                ticker
+            ]
+        )
+
+        result = create_exit_plan(
+            df,
+            trade
+        )
+
+        exit_index = int(
+            result[
+                "Exit_Index"
+            ]
+        )
+
+        plans.append(
+            {
+                **trade.to_dict(),
+
+                "Exit_Date":
+                    pd.Timestamp(
+                        df.index[
+                            exit_index
+                        ]
+                    ),
+
+                "Raw_Exit":
+                    float(
+                        result[
+                            "Raw_Exit"
+                        ]
+                    ),
+
+                "Exit_Reason":
+                    result[
+                        "Exit_Reason"
+                    ]
+            }
+        )
+
+    return pd.DataFrame(
+        plans
+    )
+
+
+# ============================================================
+# GET CLOSE
+# ============================================================
+
+def get_close(
+    all_data,
+    ticker,
+    date
+):
+
+    try:
+
+        df = all_data[
+            ticker
+        ]
+
+        available = (
+            df.loc[
+                df.index <= date,
+                "Close"
+            ]
+            .dropna()
+        )
+
+        if available.empty:
+
+            return None
+
+        return float(
+            available.iloc[-1]
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# PORTFOLIO
+# ============================================================
+
+def simulate_portfolio(
+    plans,
+    all_data,
+    qqq,
+    backtest_start
+):
+
+    grouped = {
+        date:
+            group.sort_values(
+                "Score",
+                ascending=False
+            )
+
+        for date, group
+        in plans.groupby(
+            "Entry_Date"
+        )
+    }
+
+    final_date = (
+        plans[
+            "Exit_Date"
+        ].max()
+    )
+
+    calendar = (
+        qqq.loc[
+            (
+                qqq.index >= backtest_start
+            )
+            &
+            (
+                qqq.index <= final_date
+            )
+        ].index
+    )
+
+    cash = STARTING_CAPITAL
+
+    last_equity = STARTING_CAPITAL
+
+    open_positions = []
+
+    completed = []
+
+    equity_rows = []
+
+    skipped_positions = 0
+
+    skipped_cash = 0
+
+    skipped_same_ticker = 0
+
 
     for date in calendar:
 
@@ -1313,507 +1334,737 @@ def analyze_market_regime(
             date
         )
 
-        (
-            qqq_ok,
-            dxy_ok
-        ) = market_status(
-            qqq,
-            dxy,
-            date
+
+        # ====================================================
+        # ENTRIES
+        # ====================================================
+
+        if date in grouped:
+
+            todays = grouped[
+                date
+            ]
+
+            risk_budget = (
+                last_equity
+                * RISK_PER_TRADE
+            )
+
+            for _, trade in (
+                todays.iterrows()
+            ):
+
+                if (
+                    len(
+                        open_positions
+                    )
+                    >= MAX_POSITIONS
+                ):
+
+                    skipped_positions += 1
+
+                    continue
+
+                already_open = any(
+                    p[
+                        "Ticker"
+                    ]
+                    ==
+                    trade[
+                        "Ticker"
+                    ]
+
+                    for p
+                    in open_positions
+                )
+
+                if already_open:
+
+                    skipped_same_ticker += 1
+
+                    continue
+
+                raw_entry = float(
+                    trade[
+                        "Raw_Entry"
+                    ]
+                )
+
+                initial_stop = float(
+                    trade[
+                        "Initial_Stop"
+                    ]
+                )
+
+                entry_fill = (
+                    raw_entry
+                    * (
+                        1
+                        + SLIPPAGE_PCT
+                    )
+                )
+
+                stop_reference = (
+                    initial_stop
+                    * (
+                        1
+                        - SLIPPAGE_PCT
+                    )
+                )
+
+                risk_per_share = (
+                    entry_fill
+                    - stop_reference
+                )
+
+                if risk_per_share <= 0:
+
+                    continue
+
+                shares_by_risk = (
+                    risk_budget
+                    / risk_per_share
+                )
+
+                effective_entry_cost = (
+                    entry_fill
+                    * (
+                        1
+                        + COMMISSION_PCT
+                    )
+                )
+
+                shares_by_cash = (
+                    cash
+                    / effective_entry_cost
+                )
+
+                shares = min(
+                    shares_by_risk,
+                    shares_by_cash
+                )
+
+                shares = (
+                    np.floor(
+                        shares
+                        / MIN_SHARE_SIZE
+                    )
+                    * MIN_SHARE_SIZE
+                )
+
+                if shares < MIN_SHARE_SIZE:
+
+                    skipped_cash += 1
+
+                    continue
+
+                entry_notional = (
+                    shares
+                    * entry_fill
+                )
+
+                entry_commission = (
+                    entry_notional
+                    * COMMISSION_PCT
+                )
+
+                entry_cost = (
+                    entry_notional
+                    + entry_commission
+                )
+
+                if entry_cost > cash:
+
+                    skipped_cash += 1
+
+                    continue
+
+                cash -= entry_cost
+
+                open_positions.append(
+                    {
+                        "Ticker":
+                            trade[
+                                "Ticker"
+                            ],
+
+                        "Signal_Date":
+                            trade[
+                                "Signal_Date"
+                            ],
+
+                        "Entry_Date":
+                            date,
+
+                        "Exit_Date":
+                            trade[
+                                "Exit_Date"
+                            ],
+
+                        "Exit_Reason":
+                            trade[
+                                "Exit_Reason"
+                            ],
+
+                        "Score":
+                            trade[
+                                "Score"
+                            ],
+
+                        "Shares":
+                            shares,
+
+                        "Entry_Fill":
+                            entry_fill,
+
+                        "Entry_Cost":
+                            entry_cost,
+
+                        "Entry_Commission":
+                            entry_commission,
+
+                        "Risk_Per_Share":
+                            risk_per_share,
+
+                        "Raw_Exit":
+                            trade[
+                                "Raw_Exit"
+                            ]
+                    }
+                )
+
+
+        # ====================================================
+        # EXITS
+        # ====================================================
+
+        remaining = []
+
+        for position in (
+            open_positions
+        ):
+
+            if (
+                position[
+                    "Exit_Date"
+                ]
+                != date
+            ):
+
+                remaining.append(
+                    position
+                )
+
+                continue
+
+            exit_fill = (
+                float(
+                    position[
+                        "Raw_Exit"
+                    ]
+                )
+                * (
+                    1
+                    - SLIPPAGE_PCT
+                )
+            )
+
+            exit_notional = (
+                position[
+                    "Shares"
+                ]
+                * exit_fill
+            )
+
+            exit_commission = (
+                exit_notional
+                * COMMISSION_PCT
+            )
+
+            exit_proceeds = (
+                exit_notional
+                - exit_commission
+            )
+
+            cash += (
+                exit_proceeds
+            )
+
+            net_pnl = (
+                exit_proceeds
+                - position[
+                    "Entry_Cost"
+                ]
+            )
+
+            actual_risk = (
+                position[
+                    "Shares"
+                ]
+                *
+                position[
+                    "Risk_Per_Share"
+                ]
+            )
+
+            net_r = (
+                net_pnl
+                / actual_risk
+                if actual_risk > 0
+                else 0
+            )
+
+            holding_days = (
+                date
+                -
+                position[
+                    "Entry_Date"
+                ]
+            ).days
+
+            position[
+                "Exit_Fill"
+            ] = exit_fill
+
+            position[
+                "Exit_Commission"
+            ] = exit_commission
+
+            position[
+                "Net_PnL"
+            ] = net_pnl
+
+            position[
+                "Net_R"
+            ] = net_r
+
+            position[
+                "Holding_Days"
+            ] = holding_days
+
+            completed.append(
+                position
+            )
+
+        open_positions = (
+            remaining
         )
 
-        if (
-            qqq_ok is None
-            or
-            dxy_ok is None
+
+        # ====================================================
+        # MTM / EXPOSURE
+        # ====================================================
+
+        market_value = 0.0
+
+        for position in (
+            open_positions
         ):
 
-            counts[
-                "NO_DATA"
-            ] += 1
-
-            continue
-
-        if (
-            qqq_ok
-            and dxy_ok
-        ):
-
-            state = (
-                "BOTH_PASS"
+            price = get_close(
+                all_data,
+                position[
+                    "Ticker"
+                ],
+                date
             )
 
-        elif (
-            not qqq_ok
-            and dxy_ok
-        ):
+            if price is None:
 
-            state = (
-                "QQQ_FAIL_ONLY"
+                price = (
+                    position[
+                        "Entry_Fill"
+                    ]
+                )
+
+            market_value += (
+                position[
+                    "Shares"
+                ]
+                * price
             )
 
-        elif (
-            qqq_ok
-            and not dxy_ok
-        ):
+        equity = (
+            cash
+            + market_value
+        )
 
-            state = (
-                "DXY_FAIL_ONLY"
-            )
+        last_equity = (
+            equity
+        )
 
-        else:
+        exposure_pct = (
+            market_value
+            / equity
+            * 100
+            if equity > 0
+            else 0
+        )
 
-            state = (
-                "BOTH_FAIL"
-            )
-
-        counts[
-            state
-        ] += 1
-
-        rows.append(
+        equity_rows.append(
             {
                 "Date":
                     date,
 
-                "QQQ_OK":
-                    qqq_ok,
+                "Cash":
+                    cash,
 
-                "DXY_OK":
-                    dxy_ok,
+                "Market_Value":
+                    market_value,
 
-                "State":
-                    state
+                "Equity":
+                    equity,
+
+                "Open_Positions":
+                    len(
+                        open_positions
+                    ),
+
+                "Active":
+                    1
+                    if len(
+                        open_positions
+                    ) > 0
+                    else 0,
+
+                "Exposure_%":
+                    exposure_pct
+            }
+        )
+
+
+    return (
+        pd.DataFrame(
+            completed
+        ),
+
+        pd.DataFrame(
+            equity_rows
+        ),
+
+        {
+            "Skipped_Positions":
+                skipped_positions,
+
+            "Skipped_Cash":
+                skipped_cash,
+
+            "Skipped_Same_Ticker":
+                skipped_same_ticker
+        }
+    )
+
+
+# ============================================================
+# PERFORMANCE
+# ============================================================
+
+def calculate_stats(
+    trades,
+    equity,
+    diagnostics
+):
+
+    ending = float(
+        equity[
+            "Equity"
+        ].iloc[-1]
+    )
+
+    first_date = pd.Timestamp(
+        equity[
+            "Date"
+        ].iloc[0]
+    )
+
+    last_date = pd.Timestamp(
+        equity[
+            "Date"
+        ].iloc[-1]
+    )
+
+    years = (
+        (
+            last_date
+            - first_date
+        ).days
+        / 365.25
+    )
+
+    total_return = (
+        (
+            ending
+            / STARTING_CAPITAL
+        )
+        - 1
+    ) * 100
+
+    cagr = (
+        (
+            ending
+            / STARTING_CAPITAL
+        )
+        ** (
+            1 / years
+        )
+        - 1
+    ) * 100
+
+    curve = (
+        equity[
+            "Equity"
+        ]
+    )
+
+    peak = (
+        curve.cummax()
+    )
+
+    drawdown = (
+        curve
+        / peak
+        - 1
+    ) * 100
+
+    winners = (
+        trades.loc[
+            trades[
+                "Net_PnL"
+            ] > 0,
+            "Net_PnL"
+        ]
+    )
+
+    losers = (
+        trades.loc[
+            trades[
+                "Net_PnL"
+            ] < 0,
+            "Net_PnL"
+        ]
+    )
+
+    gross_profit = (
+        winners.sum()
+    )
+
+    gross_loss = abs(
+        losers.sum()
+    )
+
+    profit_factor = (
+        gross_profit
+        / gross_loss
+        if gross_loss > 0
+        else np.inf
+    )
+
+    active_days = int(
+        equity[
+            "Active"
+        ].sum()
+    )
+
+    total_days = len(
+        equity
+    )
+
+    return {
+        "Ending_Capital":
+            ending,
+
+        "Return_%":
+            total_return,
+
+        "CAGR_%":
+            cagr,
+
+        "Trades":
+            len(
+                trades
+            ),
+
+        "Profitable_%":
+            (
+                trades[
+                    "Net_PnL"
+                ] > 0
+            ).mean()
+            * 100,
+
+        "Avg_Net_R":
+            trades[
+                "Net_R"
+            ].mean(),
+
+        "Median_R":
+            trades[
+                "Net_R"
+            ].median(),
+
+        "Profit_Factor":
+            profit_factor,
+
+        "Max_DD_%":
+            drawdown.min(),
+
+        "Active_Days_%":
+            (
+                active_days
+                / total_days
+                * 100
+            ),
+
+        "Avg_Positions":
+            equity[
+                "Open_Positions"
+            ].mean(),
+
+        "Avg_Exposure_%":
+            equity[
+                "Exposure_%"
+            ].mean(),
+
+        "Trades_Per_Year":
+            len(
+                trades
+            )
+            / years,
+
+        "Avg_Holding_Days":
+            trades[
+                "Holding_Days"
+            ].mean(),
+
+        "Skipped_Positions":
+            diagnostics[
+                "Skipped_Positions"
+            ],
+
+        "Skipped_Cash":
+            diagnostics[
+                "Skipped_Cash"
+            ],
+
+        "Skipped_Same_Ticker":
+            diagnostics[
+                "Skipped_Same_Ticker"
+            ]
+    }
+
+
+# ============================================================
+# YEARLY
+# ============================================================
+
+def yearly_results(
+    trades,
+    equity
+):
+
+    tr = trades.copy()
+
+    tr["Year"] = (
+        pd.to_datetime(
+            tr[
+                "Exit_Date"
+            ]
+        )
+        .dt.year
+    )
+
+    eq = equity.copy()
+
+    eq["Year"] = (
+        pd.to_datetime(
+            eq[
+                "Date"
+            ]
+        )
+        .dt.year
+    )
+
+    rows = []
+
+    years = sorted(
+        eq[
+            "Year"
+        ].unique()
+    )
+
+    for year in years:
+
+        t = tr[
+            tr[
+                "Year"
+            ] == year
+        ]
+
+        e = eq[
+            eq[
+                "Year"
+            ] == year
+        ]
+
+        if t.empty:
+
+            avg_r = 0.0
+            pnl = 0.0
+            trades_count = 0
+
+        else:
+
+            avg_r = (
+                t[
+                    "Net_R"
+                ].mean()
+            )
+
+            pnl = (
+                t[
+                    "Net_PnL"
+                ].sum()
+            )
+
+            trades_count = len(
+                t
+            )
+
+        rows.append(
+            {
+                "Year":
+                    year,
+
+                "Trades":
+                    trades_count,
+
+                "Net_PnL":
+                    pnl,
+
+                "Avg_R":
+                    avg_r,
+
+                "Active_%":
+                    e[
+                        "Active"
+                    ].mean()
+                    * 100,
+
+                "Avg_Exposure_%":
+                    e[
+                        "Exposure_%"
+                    ].mean()
             }
         )
 
     return (
-        counts,
         pd.DataFrame(
             rows
         )
-    )
-
-
-# ============================================================
-# PRINT MARKET REGIME
-# ============================================================
-
-def print_market_regime(
-    counts
-):
-
-    usable = (
-        counts[
-            "BOTH_PASS"
-        ]
-        +
-        counts[
-            "QQQ_FAIL_ONLY"
-        ]
-        +
-        counts[
-            "DXY_FAIL_ONLY"
-        ]
-        +
-        counts[
-            "BOTH_FAIL"
-        ]
-    )
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "1. MARKET REGIME BOTTLENECK"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    if usable == 0:
-
-        return
-
-    labels = [
-        (
-            "QQQ PASS + DXY PASS",
-            "BOTH_PASS"
-        ),
-
-        (
-            "QQQ FAIL only",
-            "QQQ_FAIL_ONLY"
-        ),
-
-        (
-            "DXY FAIL only",
-            "DXY_FAIL_ONLY"
-        ),
-
-        (
-            "BOTH FAIL",
-            "BOTH_FAIL"
+        .set_index(
+            "Year"
         )
-    ]
-
-    for label, key in labels:
-
-        count = counts[
-            key
-        ]
-
-        pct = (
-            count
-            / usable
-            * 100
-        )
-
-        print(
-            f"{label:<25}"
-            f"{count:>6} days"
-            f"   ({pct:6.2f}%)"
-        )
-
-    allowed = counts[
-        "BOTH_PASS"
-    ]
-
-    blocked = (
-        usable
-        - allowed
     )
-
-    print()
-
-    print(
-        f"Trading regime ON:      "
-        f"{allowed} days "
-        f"({allowed / usable * 100:.2f}%)"
-    )
-
-    print(
-        f"Trading regime OFF:     "
-        f"{blocked} days "
-        f"({blocked / usable * 100:.2f}%)"
-    )
-
-
-# ============================================================
-# PRINT FUNNEL
-# ============================================================
-
-def print_funnel(
-    diagnostic
-):
-
-    stage_counts = diagnostic[
-        "Stage_Counts"
-    ]
-
-    stage_dates = diagnostic[
-        "Stage_Dates"
-    ]
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "2. SEQUENTIAL SETUP FUNNEL"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "Counts below are sequential."
-    )
-
-    print(
-        "A stock/day reaches the next row only if it passed all previous rows."
-    )
-
-    print()
-
-    labels = [
-        (
-            "Usable stock-days",
-            "USABLE_DATA"
-        ),
-
-        (
-            "Strong trend",
-            "STRONG_TREND"
-        ),
-
-        (
-            "RSI 45-65",
-            "RSI"
-        ),
-
-        (
-            "Stoch RSI cross >20",
-            "STOCH_CROSS"
-        ),
-
-        (
-            "EMA20 pullback",
-            "EMA_PULLBACK"
-        ),
-
-        (
-            "Close > EMA20",
-            "CLOSE_ABOVE_EMA"
-        ),
-
-        (
-            "Bullish candle",
-            "BULLISH_CANDLE"
-        ),
-
-        (
-            "Close location >=60%",
-            "CLOSE_LOCATION"
-        ),
-
-        (
-            "Relative volume >=0.80",
-            "REL_VOLUME"
-        ),
-
-        (
-            "Valid stop / risk",
-            "VALID_RISK"
-        ),
-
-        (
-            "Entry triggered <=3d",
-            "TRIGGERED"
-        ),
-
-        (
-            "QQQ + DXY regime pass",
-            "MARKET_REGIME"
-        )
-    ]
-
-    previous = None
-
-    for label, key in labels:
-
-        count = stage_counts[
-            key
-        ]
-
-        dates = len(
-            stage_dates[
-                key
-            ]
-        )
-
-        if previous is None:
-
-            retention = 100.0
-
-        else:
-
-            retention = (
-                count
-                / previous
-                * 100
-                if previous > 0
-                else 0
-            )
-
-        print(
-            f"{label:<28}"
-            f"{count:>8} stock-days"
-            f" | {dates:>5} unique days"
-            f" | retains {retention:6.2f}%"
-        )
-
-        previous = count
-
-
-# ============================================================
-# FIRST FAIL REASON
-# ============================================================
-
-def print_fail_reasons(
-    diagnostic
-):
-
-    fails = diagnostic[
-        "Fail_Counts"
-    ]
-
-    total_failures = sum(
-        fails.values()
-    )
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "3. FIRST FAILURE REASON"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "Each stock/day is counted only at the FIRST rule that rejects it."
-    )
-
-    print()
-
-    sorted_fails = sorted(
-        fails.items(),
-        key=lambda x:
-        x[1],
-        reverse=True
-    )
-
-    for reason, count in (
-        sorted_fails
-    ):
-
-        pct = (
-            count
-            / total_failures
-            * 100
-            if total_failures > 0
-            else 0
-        )
-
-        print(
-            f"{reason:<25}"
-            f"{count:>9}"
-            f"   ({pct:6.2f}%)"
-        )
-
-
-# ============================================================
-# DAILY OPPORTUNITY SUMMARY
-# ============================================================
-
-def print_daily_summary(
-    diagnostic,
-    qqq,
-    backtest_start,
-    end_date
-):
-
-    calendar = qqq.loc[
-        (
-            qqq.index >= backtest_start
-        )
-        &
-        (
-            qqq.index <= end_date
-        )
-    ].index
-
-    total_days = len(
-        calendar
-    )
-
-    trend_days = len(
-        diagnostic[
-            "Stage_Dates"
-        ][
-            "STRONG_TREND"
-        ]
-    )
-
-    setup_days = len(
-        diagnostic[
-            "Stage_Dates"
-        ][
-            "VALID_RISK"
-        ]
-    )
-
-    trigger_days = len(
-        diagnostic[
-            "Trigger_Dates"
-        ]
-    )
-
-    final_days = len(
-        diagnostic[
-            "Regime_Pass_Dates"
-        ]
-    )
-
-    print()
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        "4. UNIQUE-DAY OPPORTUNITY SUMMARY"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    rows = [
-        (
-            "All market days",
-            total_days
-        ),
-
-        (
-            ">=1 stock in strong trend",
-            trend_days
-        ),
-
-        (
-            ">=1 complete setup",
-            setup_days
-        ),
-
-        (
-            ">=1 setup triggered",
-            trigger_days
-        ),
-
-        (
-            ">=1 triggered + regime OK",
-            final_days
-        )
-    ]
-
-    for label, days in rows:
-
-        pct = (
-            days
-            / total_days
-            * 100
-            if total_days > 0
-            else 0
-        )
-
-        print(
-            f"{label:<32}"
-            f"{days:>5} days"
-            f"   ({pct:6.2f}%)"
-        )
 
 
 # ============================================================
@@ -1827,7 +2078,7 @@ def main():
     )
 
     print(
-        "V18 - FILTER FUNNEL / INACTIVE DAYS DIAGNOSTIC"
+        "V19 - REMOVE DXY FILTER / KEEP QQQ FILTER"
     )
 
     print(
@@ -1835,21 +2086,18 @@ def main():
     )
 
     print(
-        "NO strategy rules are changed."
+        "ONLY CHANGE FROM V15/V17:"
+    )
+
+    print(
+        "  REMOVED: DXY < SMA200"
+    )
+
+    print(
+        "  KEPT:    QQQ > SMA200"
     )
 
     print()
-
-    print(
-        "We are measuring which rules reduce trading frequency."
-    )
-
-    print()
-
-    print(
-        f"History:               "
-        f"{BACKTEST_YEARS} years"
-    )
 
     print(
         f"Risk:                  "
@@ -1865,11 +2113,6 @@ def main():
         f"ATR trail:             "
         f"{ATR_TRAIL_MULT:.1f}"
     )
-
-
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
 
     print()
 
@@ -1894,17 +2137,9 @@ def main():
         "QQQ"
     )
 
-    dxy = download_market(
-        "DX-Y.NYB",
-        "DXY"
-    )
-
-    end_date = min(
+    end_date = (
         pd.Timestamp(
             qqq.index.max()
-        ),
-        pd.Timestamp(
-            dxy.index.max()
         )
     )
 
@@ -1919,9 +2154,6 @@ def main():
         requested_start,
         pd.Timestamp(
             qqq.index.min()
-        ),
-        pd.Timestamp(
-            dxy.index.min()
         )
     )
 
@@ -1933,7 +2165,7 @@ def main():
 
 
     # ========================================================
-    # PREPARE DATA ONCE
+    # PREPARE
     # ========================================================
 
     prepared_data = {}
@@ -1949,82 +2181,85 @@ def main():
                 .get_level_values(0)
             ):
 
-                df = prepare_stock(
+                prepared_data[
+                    ticker
+                ] = prepare_stock(
                     all_data[
                         ticker
                     ].copy()
                 )
 
-                if not df.empty:
+        except Exception:
 
-                    prepared_data[
-                        ticker
-                    ] = df
-
-        except Exception as e:
-
-            print(
-                f"PREP ERROR {ticker}: "
-                f"{e}"
-            )
-
-    print(
-        f"Prepared stocks:       "
-        f"{len(prepared_data)}"
-    )
+            pass
 
 
     # ========================================================
-    # MARKET REGIME
+    # CANDIDATES
     # ========================================================
 
     (
-        regime_counts,
-        regime_daily
-    ) = analyze_market_regime(
+        candidates,
+        candidate_diag
+    ) = generate_candidates(
+        all_data,
         qqq,
-        dxy,
-        backtest_start,
-        end_date
+        backtest_start
     )
 
-    print_market_regime(
-        regime_counts
+    print()
+
+    print(
+        f"Candidates:            "
+        f"{len(candidates)}"
+    )
+
+    print(
+        f"Raw signals:           "
+        f"{candidate_diag['Raw_Signals']}"
+    )
+
+    print(
+        f"Rejected by QQQ:       "
+        f"{candidate_diag['Rejected_QQQ']}"
     )
 
 
     # ========================================================
-    # FILTER FUNNEL
+    # PLANS
     # ========================================================
 
-    diagnostic = (
-        run_filter_diagnostic(
-            prepared_data,
-            qqq,
-            dxy,
-            backtest_start,
-            end_date
-        )
+    plans = create_trade_plans(
+        candidates,
+        prepared_data
     )
 
-    print_funnel(
-        diagnostic
-    )
 
-    print_fail_reasons(
-        diagnostic
-    )
+    # ========================================================
+    # PORTFOLIO
+    # ========================================================
 
-    print_daily_summary(
-        diagnostic,
+    (
+        trades,
+        equity,
+        diagnostics
+    ) = simulate_portfolio(
+        plans,
+        all_data,
         qqq,
-        backtest_start,
-        end_date
+        backtest_start
+    )
+
+
+    stats = calculate_stats(
+        trades,
+        equity,
+        diagnostics
     )
 
 
     # ========================================================
-    # SIMPLE BOTTLENECK RANKING
+    # RESULTS
     # ========================================================
 
     print()
@@ -2034,106 +2269,325 @@ def main():
     )
 
     print(
-        "5. BIGGEST BOTTLENECKS"
+        "V19 RESULTS"
     )
 
     print(
         "=" * 120
     )
 
-    failures = (
-        diagnostic[
-            "Fail_Counts"
-        ]
+    print(
+        f"Ending capital:        "
+        f"${stats['Ending_Capital']:,.2f}"
     )
 
-    relevant = {
-        k: v
-        for k, v in failures.items()
-        if k != "MISSING_DATA"
+    print(
+        f"Return:                "
+        f"{stats['Return_%']:.2f}%"
+    )
+
+    print(
+        f"CAGR:                  "
+        f"{stats['CAGR_%']:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Trades:                "
+        f"{stats['Trades']}"
+    )
+
+    print(
+        f"Trades/year:           "
+        f"{stats['Trades_Per_Year']:.2f}"
+    )
+
+    print(
+        f"Profitable:            "
+        f"{stats['Profitable_%']:.2f}%"
+    )
+
+    print(
+        f"Avg Net R:             "
+        f"{stats['Avg_Net_R']:.3f}R"
+    )
+
+    print(
+        f"Median R:              "
+        f"{stats['Median_R']:.3f}R"
+    )
+
+    print(
+        f"Profit Factor:         "
+        f"{stats['Profit_Factor']:.3f}"
+    )
+
+    print(
+        f"Max MTM DD:            "
+        f"{stats['Max_DD_%']:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Active days:           "
+        f"{stats['Active_Days_%']:.2f}%"
+    )
+
+    print(
+        f"Average positions:     "
+        f"{stats['Avg_Positions']:.2f}"
+        f" / {MAX_POSITIONS}"
+    )
+
+    print(
+        f"Average exposure:      "
+        f"{stats['Avg_Exposure_%']:.2f}%"
+    )
+
+    print(
+        f"Avg holding days:      "
+        f"{stats['Avg_Holding_Days']:.2f}"
+    )
+
+    print()
+
+    print(
+        f"Skipped positions:     "
+        f"{stats['Skipped_Positions']}"
+    )
+
+    print(
+        f"Skipped cash:          "
+        f"{stats['Skipped_Cash']}"
+    )
+
+    print(
+        f"Skipped same ticker:   "
+        f"{stats['Skipped_Same_Ticker']}"
+    )
+
+
+    # ========================================================
+    # BASELINE COMPARISON
+    # ========================================================
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "V17 BASELINE VS V19 NO-DXY"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        f"{'Metric':<25}"
+        f"{'V17 DXY ON':>15}"
+        f"{'V19 DXY OFF':>15}"
+    )
+
+    print(
+        "-" * 55
+    )
+
+    baseline = {
+        "CAGR":
+            3.20,
+
+        "Trades":
+            411,
+
+        "Trades/year":
+            27.40,
+
+        "Avg R":
+            0.165,
+
+        "PF":
+            1.346,
+
+        "DD":
+            -12.84,
+
+        "Active days":
+            44.50,
+
+        "Avg positions":
+            1.51,
+
+        "Exposure":
+            26.86
     }
 
-    ranking = sorted(
-        relevant.items(),
-        key=lambda x:
-        x[1],
-        reverse=True
+    current = {
+        "CAGR":
+            stats[
+                "CAGR_%"
+            ],
+
+        "Trades":
+            stats[
+                "Trades"
+            ],
+
+        "Trades/year":
+            stats[
+                "Trades_Per_Year"
+            ],
+
+        "Avg R":
+            stats[
+                "Avg_Net_R"
+            ],
+
+        "PF":
+            stats[
+                "Profit_Factor"
+            ],
+
+        "DD":
+            stats[
+                "Max_DD_%"
+            ],
+
+        "Active days":
+            stats[
+                "Active_Days_%"
+            ],
+
+        "Avg positions":
+            stats[
+                "Avg_Positions"
+            ],
+
+        "Exposure":
+            stats[
+                "Avg_Exposure_%"
+            ]
+    }
+
+    for metric in baseline:
+
+        print(
+            f"{metric:<25}"
+            f"{baseline[metric]:>15.3f}"
+            f"{current[metric]:>15.3f}"
+        )
+
+
+    # ========================================================
+    # YEARLY
+    # ========================================================
+
+    yearly = yearly_results(
+        trades,
+        equity
     )
 
-    for rank, (
-        reason,
-        count
-    ) in enumerate(
-        ranking[:10],
-        start=1
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "YEAR-BY-YEAR"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        yearly
+        .round(3)
+        .to_string()
+    )
+
+
+    # ========================================================
+    # TARGET CHECK
+    # ========================================================
+
+    checks = {
+        "CAGR >= 10%":
+            stats[
+                "CAGR_%"
+            ] >= 10,
+
+        "PF >= 1.25":
+            stats[
+                "Profit_Factor"
+            ] >= 1.25,
+
+        "Avg R >= 0.10":
+            stats[
+                "Avg_Net_R"
+            ] >= 0.10,
+
+        "Max DD <= 15%":
+            stats[
+                "Max_DD_%"
+            ] >= -15
+    }
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "TARGET CHECK"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    for name, passed in (
+        checks.items()
     ):
 
         print(
-            f"{rank:>2}. "
-            f"{reason:<25}"
-            f"{count:>9}"
+            f"{name:<22}"
+            f"{'PASS' if passed else 'FAIL'}"
         )
+
+    print(
+        f"\nScore: "
+        f"{sum(checks.values())}/4"
+    )
 
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    funnel_rows = []
-
-    for stage in FUNNEL_STAGES:
-
-        funnel_rows.append(
-            {
-                "Stage":
-                    stage,
-
-                "Stock_Day_Count":
-                    diagnostic[
-                        "Stage_Counts"
-                    ][stage],
-
-                "Unique_Days":
-                    len(
-                        diagnostic[
-                            "Stage_Dates"
-                        ][stage]
-                    )
-            }
-        )
-
-    pd.DataFrame(
-        funnel_rows
-    ).to_csv(
-        "v18_filter_funnel.csv",
+    candidates.to_csv(
+        "v19_candidates.csv",
         index=False
     )
 
-    pd.DataFrame(
-        [
-            {
-                "Failure":
-                    key,
-
-                "Count":
-                    value
-            }
-            for key, value
-            in diagnostic[
-                "Fail_Counts"
-            ].items()
-        ]
-    ).sort_values(
-        "Count",
-        ascending=False
-    ).to_csv(
-        "v18_first_failure.csv",
+    trades.to_csv(
+        "v19_trades.csv",
         index=False
     )
 
-    regime_daily.to_csv(
-        "v18_market_regime_daily.csv",
+    equity.to_csv(
+        "v19_equity.csv",
         index=False
+    )
+
+    yearly.to_csv(
+        "v19_yearly.csv"
     )
 
     print()
@@ -2143,7 +2597,7 @@ def main():
     )
 
     print(
-        "V18 completed."
+        "V19 completed."
     )
 
     print(
