@@ -4,14 +4,17 @@ import numpy as np
 
 
 # ============================================================
-# V21 - RSI CONCEPT TEST
+# V22 - RELATIVE VOLUME CONCEPT TEST
 #
 # COMPARE:
-#   A) RSI 45-65 ON
-#   B) RSI FILTER OFF
+#   A) RELATIVE VOLUME >= 0.80 ON
+#   B) RELATIVE VOLUME FILTER OFF
 #
-# LOCKED FROM V20:
+# LOCKED:
 #   STOCH RSI = OFF
+#   RSI FILTER = OFF
+#   QQQ > SMA200 = ON
+#   DXY < SMA200 = ON
 #
 # EVERYTHING ELSE IDENTICAL
 # ============================================================
@@ -45,8 +48,7 @@ TRAIL_HOLD_DAYS = 30
 
 ATR_TRAIL_MULT = 2.5
 
-RSI_MIN = 45.0
-RSI_MAX = 65.0
+REL_VOLUME_MIN = 0.80
 
 
 # ============================================================
@@ -73,59 +75,15 @@ TICKERS = [
 # INDICATORS
 # ============================================================
 
-def calculate_rsi(series, period=14):
+def calculate_atr(df, period=14):
 
-    delta = series.diff()
-
-    gain = delta.where(
-        delta > 0,
-        0.0
-    )
-
-    loss = -delta.where(
-        delta < 0,
-        0.0
-    )
-
-    avg_gain = gain.ewm(
-        alpha=1 / period,
-        adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / period,
-        adjust=False
-    ).mean()
-
-    rs = avg_gain / avg_loss
-
-    return 100 - (
-        100 / (1 + rs)
-    )
-
-
-def calculate_atr(
-    df,
-    period=14
-):
-
-    previous_close = (
-        df["Close"].shift(1)
-    )
+    previous_close = df["Close"].shift(1)
 
     tr = pd.concat(
         [
             df["High"] - df["Low"],
-
-            (
-                df["High"]
-                - previous_close
-            ).abs(),
-
-            (
-                df["Low"]
-                - previous_close
-            ).abs()
+            (df["High"] - previous_close).abs(),
+            (df["Low"] - previous_close).abs()
         ],
         axis=1
     ).max(axis=1)
@@ -176,17 +134,9 @@ def prepare_stock(df):
         .mean()
     )
 
-    df["ATR14"] = (
-        calculate_atr(
-            df,
-            ATR_PERIOD
-        )
-    )
-
-    df["RSI14"] = (
-        calculate_rsi(
-            df["Close"]
-        )
+    df["ATR14"] = calculate_atr(
+        df,
+        ATR_PERIOD
     )
 
     df["AVG_VOL20"] = (
@@ -209,14 +159,9 @@ def prepare_stock(df):
 # MARKET
 # ============================================================
 
-def download_market(
-    ticker,
-    name
-):
+def download_market(ticker, name):
 
-    print(
-        f"Downloading {name}..."
-    )
+    print(f"Downloading {name}...")
 
     df = yf.download(
         ticker,
@@ -228,7 +173,6 @@ def download_market(
     )
 
     if df.empty:
-
         raise RuntimeError(
             f"No data for {name}"
         )
@@ -237,7 +181,6 @@ def download_market(
         df.columns,
         pd.MultiIndex
     ):
-
         df.columns = (
             df.columns
             .get_level_values(0)
@@ -256,27 +199,20 @@ def download_market(
     return df
 
 
-def get_market_row(
-    df,
-    date
-):
+def get_market_row(df, date):
 
     available = df[
         df.index <= date
     ]
 
     if available.empty:
-
         return None
 
-    row = (
-        available.iloc[-1]
-    )
+    row = available.iloc[-1]
 
     if pd.isna(
         row["SMA200"]
     ):
-
         return None
 
     return row
@@ -303,7 +239,6 @@ def market_allows_long(
         or
         dxy_row is None
     ):
-
         return False
 
     qqq_ok = (
@@ -362,9 +297,7 @@ def strong_trend(
 
     old_sma50 = float(
         df["SMA50"]
-        .iloc[
-            i - 10
-        ]
+        .iloc[i - 10]
     )
 
     return (
@@ -423,19 +356,15 @@ def quality_score(
 
     old_sma50 = float(
         df["SMA50"]
-        .iloc[
-            i - 10
-        ]
+        .iloc[i - 10]
     )
 
     slope = (
-        sma50
-        - old_sma50
+        sma50 - old_sma50
     ) / atr
 
     ema_strength = (
-        ema20
-        - sma50
+        ema20 - sma50
     ) / atr
 
     candle_range = (
@@ -443,9 +372,7 @@ def quality_score(
     )
 
     close_location = (
-        (
-            close - low
-        )
+        (close - low)
         / candle_range
         if candle_range > 0
         else 0
@@ -473,23 +400,23 @@ def quality_score(
 # ============================================================
 # PULLBACK SETUP
 #
-# STOCH RSI IS REMOVED / OFF
+# RSI OFF
+# STOCH OFF
 #
 # ONLY VARIABLE:
-# use_rsi = True / False
+# use_volume = True / False
 # ============================================================
 
 def pullback_setup(
     df,
     i,
-    use_rsi
+    use_volume
 ):
 
     if not strong_trend(
         df,
         i
     ):
-
         return None
 
     row = df.iloc[i]
@@ -518,10 +445,6 @@ def pullback_setup(
         row["ATR14"]
     )
 
-    rsi = float(
-        row["RSI14"]
-    )
-
     volume = float(
         row["Volume"]
     )
@@ -536,36 +459,17 @@ def pullback_setup(
 
 
     # ========================================================
-    # RSI
-    #
-    # ONLY VARIABLE IN V21
-    # ========================================================
-
-    if use_rsi:
-
-        if not (
-            RSI_MIN
-            <= rsi
-            <= RSI_MAX
-        ):
-
-            return None
-
-
-    # ========================================================
     # EMA20 PULLBACK
     # ========================================================
 
     ema_distance = (
         abs(
-            low
-            - ema20
+            low - ema20
         )
         / atr
     )
 
     if ema_distance > 0.50:
-
         return None
 
 
@@ -574,7 +478,6 @@ def pullback_setup(
     # ========================================================
 
     if close <= ema20:
-
         return None
 
 
@@ -583,7 +486,6 @@ def pullback_setup(
     # ========================================================
 
     if close <= open_price:
-
         return None
 
 
@@ -596,7 +498,6 @@ def pullback_setup(
     )
 
     if candle_range <= 0:
-
         return None
 
     close_location = (
@@ -604,26 +505,26 @@ def pullback_setup(
     ) / candle_range
 
     if close_location < 0.60:
-
         return None
 
 
     # ========================================================
     # RELATIVE VOLUME
+    #
+    # ONLY VARIABLE IN V22
     # ========================================================
 
     if avg_volume <= 0:
-
         return None
 
     relative_volume = (
-        volume
-        / avg_volume
+        volume / avg_volume
     )
 
-    if relative_volume < 0.80:
+    if use_volume:
 
-        return None
+        if relative_volume < REL_VOLUME_MIN:
+            return None
 
 
     # ========================================================
@@ -648,19 +549,16 @@ def pullback_setup(
     )
 
     if risk <= 0:
-
         return None
 
     if risk < (
         0.50 * atr
     ):
-
         return None
 
     if risk > (
         3.0 * atr
     ):
-
         return None
 
     return {
@@ -669,6 +567,9 @@ def pullback_setup(
 
         "Stop":
             stop,
+
+        "Relative_Volume":
+            relative_volume,
 
         "Score":
             quality_score(
@@ -700,8 +601,7 @@ def find_entry(
     ):
 
         if float(
-            df["High"]
-            .iloc[i]
+            df["High"].iloc[i]
         ) >= trigger:
 
             return i
@@ -721,8 +621,7 @@ def simulate_baseline_lifecycle(
 ):
 
     entry_open = float(
-        df["Open"]
-        .iloc[
+        df["Open"].iloc[
             entry_index
         ]
     )
@@ -733,12 +632,10 @@ def simulate_baseline_lifecycle(
     )
 
     risk = (
-        raw_entry
-        - stop
+        raw_entry - stop
     )
 
     if risk <= 0:
-
         return None
 
     target = (
@@ -820,13 +717,12 @@ def generate_candidates(
     qqq,
     dxy,
     backtest_start,
-    use_rsi
+    use_volume
 ):
 
     candidates = []
 
     raw_signals = 0
-
     rejected_market = 0
 
     for ticker in TICKERS:
@@ -839,7 +735,6 @@ def generate_candidates(
                 all_data.columns
                 .get_level_values(0)
             ):
-
                 continue
 
             df = prepare_stock(
@@ -849,23 +744,18 @@ def generate_candidates(
             )
 
             if len(df) < 250:
-
                 continue
 
             i = 210
 
             while i < len(df) - 1:
 
-                signal_date = (
-                    pd.Timestamp(
-                        df.index[i]
-                    )
+                signal_date = pd.Timestamp(
+                    df.index[i]
                 )
 
                 if signal_date < backtest_start:
-
                     i += 1
-
                     continue
 
                 required = [
@@ -873,47 +763,37 @@ def generate_candidates(
                     "SMA50",
                     "EMA20",
                     "ATR14",
-                    "RSI14",
                     "AVG_VOL20",
                     "LOW5"
                 ]
 
                 if any(
                     pd.isna(
-                        df[col]
-                        .iloc[i]
+                        df[col].iloc[i]
                     )
                     for col in required
                 ):
-
                     i += 1
-
                     continue
 
                 setup = pullback_setup(
                     df,
                     i,
-                    use_rsi
+                    use_volume
                 )
 
                 if setup is None:
-
                     i += 1
-
                     continue
 
                 raw_signals += 1
 
                 trigger = float(
-                    setup[
-                        "Trigger"
-                    ]
+                    setup["Trigger"]
                 )
 
                 stop = float(
-                    setup[
-                        "Stop"
-                    ]
+                    setup["Stop"]
                 )
 
                 entry_index = find_entry(
@@ -931,12 +811,10 @@ def generate_candidates(
 
                     continue
 
-                entry_date = (
-                    pd.Timestamp(
-                        df.index[
-                            entry_index
-                        ]
-                    )
+                entry_date = pd.Timestamp(
+                    df.index[
+                        entry_index
+                    ]
                 )
 
                 if not market_allows_long(
@@ -964,9 +842,7 @@ def generate_candidates(
                 )
 
                 if baseline is None:
-
                     i += 1
-
                     continue
 
                 candidates.append(
@@ -991,10 +867,11 @@ def generate_candidates(
                         "Initial_Stop":
                             stop,
 
-                        "RSI14":
-                            rsi_if_available(
-                                df,
-                                i
+                        "Relative_Volume":
+                            float(
+                                setup[
+                                    "Relative_Volume"
+                                ]
                             ),
 
                         "Score":
@@ -1057,26 +934,8 @@ def generate_candidates(
     )
 
 
-def rsi_if_available(
-    df,
-    i
-):
-
-    try:
-
-        return float(
-            df[
-                "RSI14"
-            ].iloc[i]
-        )
-
-    except Exception:
-
-        return np.nan
-
-
 # ============================================================
-# 2.5 ATR TRAIL
+# 2.5 ATR EXIT
 # ============================================================
 
 def create_exit_plan(
@@ -1110,7 +969,6 @@ def create_exit_plan(
     )
 
     trail = initial_stop
-
     highest_close = raw_entry
 
     for i in range(
@@ -1184,9 +1042,7 @@ def create_exit_plan(
 
         "Raw_Exit":
             float(
-                df[
-                    "Close"
-                ].iloc[
+                df["Close"].iloc[
                     end
                 ]
             ),
@@ -1197,7 +1053,7 @@ def create_exit_plan(
 
 
 # ============================================================
-# CREATE PLANS
+# CREATE TRADE PLANS
 # ============================================================
 
 def create_trade_plans(
@@ -1211,27 +1067,20 @@ def create_trade_plans(
         candidates.iterrows()
     ):
 
-        ticker = (
-            trade[
-                "Ticker"
-            ]
-        )
+        ticker = trade[
+            "Ticker"
+        ]
 
         if ticker not in prepared_data:
-
             continue
 
-        df = (
-            prepared_data[
-                ticker
-            ]
-        )
+        df = prepared_data[
+            ticker
+        ]
 
-        result = (
-            create_exit_plan(
-                df,
-                trade
-            )
+        result = create_exit_plan(
+            df,
+            trade
         )
 
         exit_index = int(
@@ -1295,7 +1144,6 @@ def get_close(
         )
 
         if available.empty:
-
             return None
 
         return float(
@@ -1303,7 +1151,6 @@ def get_close(
         )
 
     except Exception:
-
         return None
 
 
@@ -1348,32 +1195,25 @@ def simulate_portfolio(
     calendar = (
         qqq.loc[
             (
-                qqq.index
-                >= backtest_start
+                qqq.index >= backtest_start
             )
             &
             (
-                qqq.index
-                <= final_date
+                qqq.index <= final_date
             )
         ]
         .index
     )
 
     cash = STARTING_CAPITAL
-
     last_equity = STARTING_CAPITAL
 
     open_positions = []
-
     completed = []
-
     equity_rows = []
 
     skipped_positions = 0
-
     skipped_cash = 0
-
     skipped_same_ticker = 0
 
 
@@ -1411,23 +1251,18 @@ def simulate_portfolio(
                 ):
 
                     skipped_positions += 1
-
                     continue
 
                 if any(
-                    p[
-                        "Ticker"
-                    ]
+                    p["Ticker"]
                     ==
-                    trade[
-                        "Ticker"
-                    ]
+                    trade["Ticker"]
 
-                    for p in open_positions
+                    for p
+                    in open_positions
                 ):
 
                     skipped_same_ticker += 1
-
                     continue
 
                 raw_entry = float(
@@ -1464,7 +1299,6 @@ def simulate_portfolio(
                 )
 
                 if risk_per_share <= 0:
-
                     continue
 
                 shares_by_risk = (
@@ -1501,7 +1335,6 @@ def simulate_portfolio(
                 if shares < MIN_SHARE_SIZE:
 
                     skipped_cash += 1
-
                     continue
 
                 entry_notional = (
@@ -1522,12 +1355,9 @@ def simulate_portfolio(
                 if entry_cost > cash:
 
                     skipped_cash += 1
-
                     continue
 
-                cash -= (
-                    entry_cost
-                )
+                cash -= entry_cost
 
                 open_positions.append(
                     {
@@ -1559,9 +1389,9 @@ def simulate_portfolio(
                                 "Score"
                             ],
 
-                        "RSI14":
+                        "Relative_Volume":
                             trade[
-                                "RSI14"
+                                "Relative_Volume"
                             ],
 
                         "Shares":
@@ -1639,9 +1469,7 @@ def simulate_portfolio(
                 - exit_commission
             )
 
-            cash += (
-                exit_proceeds
-            )
+            cash += exit_proceeds
 
             net_pnl = (
                 exit_proceeds
@@ -1699,9 +1527,7 @@ def simulate_portfolio(
                 position
             )
 
-        open_positions = (
-            remaining
-        )
+        open_positions = remaining
 
 
         # ====================================================
@@ -1781,9 +1607,7 @@ def simulate_portfolio(
             }
         )
 
-        last_equity = (
-            equity
-        )
+        last_equity = equity
 
 
     return (
@@ -1863,15 +1687,11 @@ def calculate_stats(
         - 1
     ) * 100
 
-    curve = (
-        equity[
-            "Equity"
-        ]
-    )
+    curve = equity[
+        "Equity"
+    ]
 
-    peak = (
-        curve.cummax()
-    )
+    peak = curve.cummax()
 
     drawdown = (
         curve
@@ -1908,14 +1728,14 @@ def calculate_stats(
         else np.inf
     )
 
-    total_days = len(
-        equity
-    )
-
     active_days = int(
         equity[
             "Active"
         ].sum()
+    )
+
+    total_days = len(
+        equity
     )
 
     return {
@@ -2000,50 +1820,49 @@ def calculate_stats(
 
 
 # ============================================================
-# RSI BUCKET ANALYSIS
+# RELATIVE VOLUME BUCKET ANALYSIS
 #
-# Extra diagnostic for RSI OFF trades.
-# Does NOT alter strategy.
+# DIAGNOSTIC ONLY.
+# DOES NOT ALTER THE STRATEGY.
 # ============================================================
 
-def rsi_bucket_analysis(
+def volume_bucket_analysis(
     trades
 ):
 
     if trades.empty:
-
         return pd.DataFrame()
 
     df = trades.copy()
 
     bins = [
         0,
-        40,
-        45,
-        50,
-        55,
-        60,
-        65,
-        70,
-        100
+        0.50,
+        0.65,
+        0.80,
+        1.00,
+        1.25,
+        1.50,
+        2.00,
+        np.inf
     ]
 
     labels = [
-        "<40",
-        "40-45",
-        "45-50",
-        "50-55",
-        "55-60",
-        "60-65",
-        "65-70",
-        "70+"
+        "<0.50",
+        "0.50-0.65",
+        "0.65-0.80",
+        "0.80-1.00",
+        "1.00-1.25",
+        "1.25-1.50",
+        "1.50-2.00",
+        "2.00+"
     ]
 
     df[
-        "RSI_Bucket"
+        "Volume_Bucket"
     ] = pd.cut(
         df[
-            "RSI14"
+            "Relative_Volume"
         ],
         bins=bins,
         labels=labels,
@@ -2054,47 +1873,43 @@ def rsi_bucket_analysis(
 
     for bucket, group in (
         df.groupby(
-            "RSI_Bucket",
+            "Volume_Bucket",
             observed=False
         )
     ):
 
         if group.empty:
-
             continue
 
-        winners = group.loc[
+        positive_r = group.loc[
             group[
-                "Net_PnL"
+                "Net_R"
             ] > 0,
-            "Net_PnL"
+            "Net_R"
         ]
 
-        losers = group.loc[
+        negative_r = group.loc[
             group[
-                "Net_PnL"
+                "Net_R"
             ] < 0,
-            "Net_PnL"
+            "Net_R"
         ]
 
-        gross_profit = (
-            winners.sum()
-        )
-
-        gross_loss = abs(
-            losers.sum()
-        )
-
-        pf = (
-            gross_profit
-            / gross_loss
-            if gross_loss > 0
+        pf_r = (
+            positive_r.sum()
+            /
+            abs(
+                negative_r.sum()
+            )
+            if abs(
+                negative_r.sum()
+            ) > 0
             else np.inf
         )
 
         rows.append(
             {
-                "RSI_Bucket":
+                "Volume_Bucket":
                     str(
                         bucket
                     ),
@@ -2109,8 +1924,13 @@ def rsi_bucket_analysis(
                         "Net_R"
                     ].mean(),
 
-                "Profit_Factor":
-                    pf,
+                "Median_R":
+                    group[
+                        "Net_R"
+                    ].median(),
+
+                "PF_R":
+                    pf_r,
 
                 "Net_PnL":
                     group[
@@ -2132,7 +1952,7 @@ def rsi_bucket_analysis(
             rows
         )
         .set_index(
-            "RSI_Bucket"
+            "Volume_Bucket"
         )
     )
 
@@ -2143,7 +1963,7 @@ def rsi_bucket_analysis(
 
 def run_variant(
     name,
-    use_rsi,
+    use_volume,
     all_data,
     prepared_data,
     qqq,
@@ -2173,7 +1993,7 @@ def run_variant(
         qqq,
         dxy,
         backtest_start,
-        use_rsi
+        use_volume
     )
 
     print(
@@ -2288,7 +2108,7 @@ def main():
     )
 
     print(
-        "V21 - RSI 45-65 ON VS OFF"
+        "V22 - RELATIVE VOLUME >= 0.80 ON VS OFF"
     )
 
     print(
@@ -2296,7 +2116,11 @@ def main():
     )
 
     print(
-        "STOCH RSI is OFF in BOTH variants."
+        "STOCH RSI: OFF"
+    )
+
+    print(
+        "RSI filter: OFF"
     )
 
     print()
@@ -2306,7 +2130,7 @@ def main():
     )
 
     print(
-        "  RSI 45-65 ON vs RSI filter OFF"
+        "  Relative Volume >= 0.80"
     )
 
     print()
@@ -2342,7 +2166,7 @@ def main():
 
 
     # ========================================================
-    # DOWNLOAD
+    # DOWNLOAD ONCE
     # ========================================================
 
     print()
@@ -2407,7 +2231,7 @@ def main():
 
 
     # ========================================================
-    # PREPARED DATA
+    # PREPARE DATA
     # ========================================================
 
     prepared_data = {}
@@ -2432,12 +2256,11 @@ def main():
                 )
 
         except Exception:
-
             pass
 
 
     # ========================================================
-    # RUN A: RSI ON
+    # RUN A
     # ========================================================
 
     (
@@ -2445,7 +2268,7 @@ def main():
         trades_on,
         equity_on
     ) = run_variant(
-        "A - RSI 45-65 ON",
+        "A - RELATIVE VOLUME >= 0.80 ON",
         True,
         all_data,
         prepared_data,
@@ -2456,7 +2279,7 @@ def main():
 
 
     # ========================================================
-    # RUN B: RSI OFF
+    # RUN B
     # ========================================================
 
     (
@@ -2464,7 +2287,7 @@ def main():
         trades_off,
         equity_off
     ) = run_variant(
-        "B - RSI OFF",
+        "B - RELATIVE VOLUME OFF",
         False,
         all_data,
         prepared_data,
@@ -2485,7 +2308,7 @@ def main():
     )
 
     print(
-        "V21 DIRECT COMPARISON"
+        "V22 DIRECT COMPARISON"
     )
 
     print(
@@ -2494,8 +2317,8 @@ def main():
 
     print(
         f"{'Metric':<25}"
-        f"{'RSI ON':>15}"
-        f"{'RSI OFF':>15}"
+        f"{'VOLUME ON':>15}"
+        f"{'VOLUME OFF':>15}"
     )
 
     print(
@@ -2618,7 +2441,7 @@ def main():
 
 
     # ========================================================
-    # CHANGE
+    # CHANGES
     # ========================================================
 
     print()
@@ -2628,7 +2451,7 @@ def main():
     )
 
     print(
-        "CHANGE WHEN RSI FILTER IS REMOVED"
+        "CHANGE WHEN VOLUME FILTER IS REMOVED"
     )
 
     print(
@@ -2672,11 +2495,11 @@ def main():
 
 
     # ========================================================
-    # RSI BUCKET ANALYSIS
+    # VOLUME BUCKETS
     # ========================================================
 
     bucket_stats = (
-        rsi_bucket_analysis(
+        volume_bucket_analysis(
             trades_off
         )
     )
@@ -2688,7 +2511,7 @@ def main():
     )
 
     print(
-        "RSI BUCKET PERFORMANCE - RSI OFF VERSION"
+        "RELATIVE VOLUME BUCKET PERFORMANCE - FILTER OFF"
     )
 
     print(
@@ -2707,27 +2530,27 @@ def main():
     # ========================================================
 
     trades_on.to_csv(
-        "v21_rsi_on_trades.csv",
+        "v22_volume_on_trades.csv",
         index=False
     )
 
     trades_off.to_csv(
-        "v21_rsi_off_trades.csv",
+        "v22_volume_off_trades.csv",
         index=False
     )
 
     equity_on.to_csv(
-        "v21_rsi_on_equity.csv",
+        "v22_volume_on_equity.csv",
         index=False
     )
 
     equity_off.to_csv(
-        "v21_rsi_off_equity.csv",
+        "v22_volume_off_equity.csv",
         index=False
     )
 
     bucket_stats.to_csv(
-        "v21_rsi_buckets.csv"
+        "v22_volume_buckets.csv"
     )
 
     print()
@@ -2737,7 +2560,7 @@ def main():
     )
 
     print(
-        "V21 completed."
+        "V22 completed."
     )
 
     print(
