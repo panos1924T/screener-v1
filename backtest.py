@@ -4,19 +4,30 @@ import numpy as np
 
 
 # ============================================================
-# V22 - RELATIVE VOLUME CONCEPT TEST
+# V23 - QUALITY SCORE / RANKING DIAGNOSTIC
 #
-# COMPARE:
-#   A) RELATIVE VOLUME >= 0.80 ON
-#   B) RELATIVE VOLUME FILTER OFF
+# EXACT V22 BEST CORE
 #
 # LOCKED:
-#   STOCH RSI = OFF
-#   RSI FILTER = OFF
-#   QQQ > SMA200 = ON
-#   DXY < SMA200 = ON
+#   QQQ > SMA200
+#   DXY < SMA200
+#   STOCH RSI OFF
+#   RSI FILTER OFF
+#   RELATIVE VOLUME >= 0.80 ON
+#   MAX POSITIONS = 5
+#   RISK = 0.75%
+#   EXIT = 2.5 ATR TRAIL
 #
-# EVERYTHING ELSE IDENTICAL
+# NO STRATEGY RULE CHANGES.
+#
+# PURPOSE:
+# Does Quality Score actually rank better trades higher?
+#
+# ANALYSIS:
+#   A) EXECUTED trades by score quartile
+#   B) ALL candidates independently by score quartile
+#   C) Score vs R rank correlation
+#   D) Top half vs bottom half
 # ============================================================
 
 
@@ -25,11 +36,15 @@ import numpy as np
 # ============================================================
 
 STARTING_CAPITAL = 1000.0
+
 RISK_PER_TRADE = 0.0075
+
 MAX_POSITIONS = 5
 
 SLIPPAGE_PCT = 0.0005
+
 COMMISSION_PCT = 0.0002
+
 MIN_SHARE_SIZE = 0.0001
 
 
@@ -38,12 +53,15 @@ MIN_SHARE_SIZE = 0.0001
 # ============================================================
 
 DOWNLOAD_PERIOD = "max"
+
 BACKTEST_YEARS = 15
 
 ATR_PERIOD = 14
 
 ENTRY_VALID_DAYS = 3
+
 FIXED_HOLD_DAYS = 10
+
 TRAIL_HOLD_DAYS = 30
 
 ATR_TRAIL_MULT = 2.5
@@ -161,7 +179,9 @@ def prepare_stock(df):
 
 def download_market(ticker, name):
 
-    print(f"Downloading {name}...")
+    print(
+        f"Downloading {name}..."
+    )
 
     df = yf.download(
         ticker,
@@ -173,6 +193,7 @@ def download_market(ticker, name):
     )
 
     if df.empty:
+
         raise RuntimeError(
             f"No data for {name}"
         )
@@ -181,6 +202,7 @@ def download_market(ticker, name):
         df.columns,
         pd.MultiIndex
     ):
+
         df.columns = (
             df.columns
             .get_level_values(0)
@@ -206,6 +228,7 @@ def get_market_row(df, date):
     ]
 
     if available.empty:
+
         return None
 
     row = available.iloc[-1]
@@ -213,6 +236,7 @@ def get_market_row(df, date):
     if pd.isna(
         row["SMA200"]
     ):
+
         return None
 
     return row
@@ -239,9 +263,10 @@ def market_allows_long(
         or
         dxy_row is None
     ):
+
         return False
 
-    qqq_ok = (
+    return (
         float(
             qqq_row["Close"]
         )
@@ -249,9 +274,7 @@ def market_allows_long(
         float(
             qqq_row["SMA200"]
         )
-    )
-
-    dxy_ok = (
+        and
         float(
             dxy_row["Close"]
         )
@@ -261,21 +284,12 @@ def market_allows_long(
         )
     )
 
-    return (
-        qqq_ok
-        and
-        dxy_ok
-    )
-
 
 # ============================================================
 # STRONG TREND
 # ============================================================
 
-def strong_trend(
-    df,
-    i
-):
+def strong_trend(df, i):
 
     row = df.iloc[i]
 
@@ -296,8 +310,9 @@ def strong_trend(
     )
 
     old_sma50 = float(
-        df["SMA50"]
-        .iloc[i - 10]
+        df["SMA50"].iloc[
+            i - 10
+        ]
     )
 
     return (
@@ -312,13 +327,10 @@ def strong_trend(
 
 
 # ============================================================
-# QUALITY SCORE
+# QUALITY SCORE + COMPONENTS
 # ============================================================
 
-def quality_score(
-    df,
-    i
-):
+def score_components(df, i):
 
     row = df.iloc[i]
 
@@ -355,11 +367,12 @@ def quality_score(
     )
 
     old_sma50 = float(
-        df["SMA50"]
-        .iloc[i - 10]
+        df["SMA50"].iloc[
+            i - 10
+        ]
     )
 
-    slope = (
+    slope_score = (
         sma50 - old_sma50
     ) / atr
 
@@ -372,7 +385,9 @@ def quality_score(
     )
 
     close_location = (
-        (close - low)
+        (
+            close - low
+        )
         / candle_range
         if candle_range > 0
         else 0
@@ -384,39 +399,47 @@ def quality_score(
         else 0
     )
 
-    relative_volume = min(
+    capped_relative_volume = min(
         relative_volume,
         2.0
     )
 
-    return (
-        slope
+    quality = (
+        slope_score
         + ema_strength
         + close_location
-        + relative_volume
+        + capped_relative_volume
     )
 
+    return {
+        "Score":
+            quality,
+
+        "Slope_Score":
+            slope_score,
+
+        "EMA_Strength":
+            ema_strength,
+
+        "Close_Location":
+            close_location,
+
+        "Relative_Volume":
+            relative_volume
+    }
+
 
 # ============================================================
-# PULLBACK SETUP
-#
-# RSI OFF
-# STOCH OFF
-#
-# ONLY VARIABLE:
-# use_volume = True / False
+# SETUP - EXACT V22 BEST
 # ============================================================
 
-def pullback_setup(
-    df,
-    i,
-    use_volume
-):
+def pullback_setup(df, i):
 
     if not strong_trend(
         df,
         i
     ):
+
         return None
 
     row = df.iloc[i]
@@ -470,6 +493,7 @@ def pullback_setup(
     )
 
     if ema_distance > 0.50:
+
         return None
 
 
@@ -478,6 +502,7 @@ def pullback_setup(
     # ========================================================
 
     if close <= ema20:
+
         return None
 
 
@@ -486,6 +511,7 @@ def pullback_setup(
     # ========================================================
 
     if close <= open_price:
+
         return None
 
 
@@ -498,6 +524,7 @@ def pullback_setup(
     )
 
     if candle_range <= 0:
+
         return None
 
     close_location = (
@@ -505,26 +532,26 @@ def pullback_setup(
     ) / candle_range
 
     if close_location < 0.60:
+
         return None
 
 
     # ========================================================
-    # RELATIVE VOLUME
-    #
-    # ONLY VARIABLE IN V22
+    # RELATIVE VOLUME >= 0.80
     # ========================================================
 
     if avg_volume <= 0:
+
         return None
 
     relative_volume = (
-        volume / avg_volume
+        volume
+        / avg_volume
     )
 
-    if use_volume:
+    if relative_volume < REL_VOLUME_MIN:
 
-        if relative_volume < REL_VOLUME_MIN:
-            return None
+        return None
 
 
     # ========================================================
@@ -549,17 +576,26 @@ def pullback_setup(
     )
 
     if risk <= 0:
+
         return None
 
     if risk < (
         0.50 * atr
     ):
+
         return None
 
     if risk > (
         3.0 * atr
     ):
+
         return None
+
+
+    components = score_components(
+        df,
+        i
+    )
 
     return {
         "Trigger":
@@ -568,19 +604,12 @@ def pullback_setup(
         "Stop":
             stop,
 
-        "Relative_Volume":
-            relative_volume,
-
-        "Score":
-            quality_score(
-                df,
-                i
-            )
+        **components
     }
 
 
 # ============================================================
-# FIND ENTRY
+# ENTRY
 # ============================================================
 
 def find_entry(
@@ -610,7 +639,9 @@ def find_entry(
 
 
 # ============================================================
-# BASELINE LIFECYCLE
+# BASELINE CANDIDATE LIFECYCLE
+#
+# KEPT EXACTLY FOR COMPARABILITY
 # ============================================================
 
 def simulate_baseline_lifecycle(
@@ -636,6 +667,7 @@ def simulate_baseline_lifecycle(
     )
 
     if risk <= 0:
+
         return None
 
     target = (
@@ -716,14 +748,15 @@ def generate_candidates(
     all_data,
     qqq,
     dxy,
-    backtest_start,
-    use_volume
+    backtest_start
 ):
 
     candidates = []
 
     raw_signals = 0
+
     rejected_market = 0
+
 
     for ticker in TICKERS:
 
@@ -735,6 +768,7 @@ def generate_candidates(
                 all_data.columns
                 .get_level_values(0)
             ):
+
                 continue
 
             df = prepare_stock(
@@ -744,6 +778,7 @@ def generate_candidates(
             )
 
             if len(df) < 250:
+
                 continue
 
             i = 210
@@ -755,7 +790,9 @@ def generate_candidates(
                 )
 
                 if signal_date < backtest_start:
+
                     i += 1
+
                     continue
 
                 required = [
@@ -773,17 +810,20 @@ def generate_candidates(
                     )
                     for col in required
                 ):
+
                     i += 1
+
                     continue
 
                 setup = pullback_setup(
                     df,
-                    i,
-                    use_volume
+                    i
                 )
 
                 if setup is None:
+
                     i += 1
+
                     continue
 
                 raw_signals += 1
@@ -842,7 +882,9 @@ def generate_candidates(
                 )
 
                 if baseline is None:
+
                     i += 1
+
                     continue
 
                 candidates.append(
@@ -867,17 +909,38 @@ def generate_candidates(
                         "Initial_Stop":
                             stop,
 
-                        "Relative_Volume":
-                            float(
-                                setup[
-                                    "Relative_Volume"
-                                ]
-                            ),
-
                         "Score":
                             float(
                                 setup[
                                     "Score"
+                                ]
+                            ),
+
+                        "Slope_Score":
+                            float(
+                                setup[
+                                    "Slope_Score"
+                                ]
+                            ),
+
+                        "EMA_Strength":
+                            float(
+                                setup[
+                                    "EMA_Strength"
+                                ]
+                            ),
+
+                        "Close_Location":
+                            float(
+                                setup[
+                                    "Close_Location"
+                                ]
+                            ),
+
+                        "Relative_Volume":
+                            float(
+                                setup[
+                                    "Relative_Volume"
                                 ]
                             )
                     }
@@ -898,6 +961,7 @@ def generate_candidates(
                 f"ERROR {ticker}: "
                 f"{type(e).__name__}: {e}"
             )
+
 
     result = pd.DataFrame(
         candidates
@@ -935,7 +999,7 @@ def generate_candidates(
 
 
 # ============================================================
-# 2.5 ATR EXIT
+# ACTUAL 2.5 ATR EXIT
 # ============================================================
 
 def create_exit_plan(
@@ -969,7 +1033,9 @@ def create_exit_plan(
     )
 
     trail = initial_stop
+
     highest_close = raw_entry
+
 
     for i in range(
         entry_index,
@@ -1005,6 +1071,7 @@ def create_exit_plan(
             calculated_trail
         )
 
+
         if open_price < trail:
 
             return {
@@ -1017,6 +1084,7 @@ def create_exit_plan(
                 "Exit_Reason":
                     "ATR_GAP"
             }
+
 
         if low <= trail:
 
@@ -1031,10 +1099,12 @@ def create_exit_plan(
                     "ATR_TRAIL"
             }
 
+
         highest_close = max(
             highest_close,
             close
         )
+
 
     return {
         "Exit_Index":
@@ -1053,7 +1123,7 @@ def create_exit_plan(
 
 
 # ============================================================
-# CREATE TRADE PLANS
+# CREATE ALL TRADE PLANS
 # ============================================================
 
 def create_trade_plans(
@@ -1062,6 +1132,7 @@ def create_trade_plans(
 ):
 
     plans = []
+
 
     for _, trade in (
         candidates.iterrows()
@@ -1072,6 +1143,7 @@ def create_trade_plans(
         ]
 
         if ticker not in prepared_data:
+
             continue
 
         df = prepared_data[
@@ -1089,6 +1161,91 @@ def create_trade_plans(
             ]
         )
 
+
+        # ====================================================
+        # STANDALONE CANDIDATE R
+        #
+        # Treat each candidate independently.
+        # Includes slippage + commissions.
+        # Position size is irrelevant because R is normalized.
+        # ====================================================
+
+        raw_entry = float(
+            trade[
+                "Raw_Entry"
+            ]
+        )
+
+        initial_stop = float(
+            trade[
+                "Initial_Stop"
+            ]
+        )
+
+        raw_exit = float(
+            result[
+                "Raw_Exit"
+            ]
+        )
+
+        entry_fill = (
+            raw_entry
+            * (
+                1
+                + SLIPPAGE_PCT
+            )
+        )
+
+        exit_fill = (
+            raw_exit
+            * (
+                1
+                - SLIPPAGE_PCT
+            )
+        )
+
+        stop_reference = (
+            initial_stop
+            * (
+                1
+                - SLIPPAGE_PCT
+            )
+        )
+
+        risk_per_share = (
+            entry_fill
+            - stop_reference
+        )
+
+        entry_cost = (
+            entry_fill
+            * (
+                1
+                + COMMISSION_PCT
+            )
+        )
+
+        exit_proceeds = (
+            exit_fill
+            * (
+                1
+                - COMMISSION_PCT
+            )
+        )
+
+        candidate_pnl_per_share = (
+            exit_proceeds
+            - entry_cost
+        )
+
+        candidate_net_r = (
+            candidate_pnl_per_share
+            / risk_per_share
+            if risk_per_share > 0
+            else np.nan
+        )
+
+
         plans.append(
             {
                 **trade.to_dict(),
@@ -1101,18 +1258,18 @@ def create_trade_plans(
                     ),
 
                 "Raw_Exit":
-                    float(
-                        result[
-                            "Raw_Exit"
-                        ]
-                    ),
+                    raw_exit,
 
                 "Exit_Reason":
                     result[
                         "Exit_Reason"
-                    ]
+                    ],
+
+                "Candidate_Net_R":
+                    candidate_net_r
             }
         )
+
 
     return pd.DataFrame(
         plans
@@ -1144,6 +1301,7 @@ def get_close(
         )
 
         if available.empty:
+
             return None
 
         return float(
@@ -1151,6 +1309,7 @@ def get_close(
         )
 
     except Exception:
+
         return None
 
 
@@ -1165,14 +1324,6 @@ def simulate_portfolio(
     backtest_start
 ):
 
-    if plans.empty:
-
-        return (
-            pd.DataFrame(),
-            pd.DataFrame(),
-            {}
-        )
-
     grouped = {
         date:
             group.sort_values(
@@ -1186,6 +1337,7 @@ def simulate_portfolio(
         )
     }
 
+
     final_date = (
         plans[
             "Exit_Date"
@@ -1195,25 +1347,33 @@ def simulate_portfolio(
     calendar = (
         qqq.loc[
             (
-                qqq.index >= backtest_start
+                qqq.index
+                >= backtest_start
             )
             &
             (
-                qqq.index <= final_date
+                qqq.index
+                <= final_date
             )
-        ]
-        .index
+        ].index
     )
 
+
     cash = STARTING_CAPITAL
+
     last_equity = STARTING_CAPITAL
 
     open_positions = []
+
     completed = []
+
     equity_rows = []
 
+
     skipped_positions = 0
+
     skipped_cash = 0
+
     skipped_same_ticker = 0
 
 
@@ -1239,6 +1399,7 @@ def simulate_portfolio(
                 * RISK_PER_TRADE
             )
 
+
             for _, trade in (
                 todays.iterrows()
             ):
@@ -1251,7 +1412,9 @@ def simulate_portfolio(
                 ):
 
                     skipped_positions += 1
+
                     continue
+
 
                 if any(
                     p["Ticker"]
@@ -1263,7 +1426,9 @@ def simulate_portfolio(
                 ):
 
                     skipped_same_ticker += 1
+
                     continue
+
 
                 raw_entry = float(
                     trade[
@@ -1276,6 +1441,7 @@ def simulate_portfolio(
                         "Initial_Stop"
                     ]
                 )
+
 
                 entry_fill = (
                     raw_entry
@@ -1299,14 +1465,16 @@ def simulate_portfolio(
                 )
 
                 if risk_per_share <= 0:
+
                     continue
+
 
                 shares_by_risk = (
                     risk_budget
                     / risk_per_share
                 )
 
-                effective_entry_cost = (
+                entry_cost_per_share = (
                     entry_fill
                     * (
                         1
@@ -1316,8 +1484,9 @@ def simulate_portfolio(
 
                 shares_by_cash = (
                     cash
-                    / effective_entry_cost
+                    / entry_cost_per_share
                 )
+
 
                 shares = min(
                     shares_by_risk,
@@ -1332,10 +1501,13 @@ def simulate_portfolio(
                     * MIN_SHARE_SIZE
                 )
 
+
                 if shares < MIN_SHARE_SIZE:
 
                     skipped_cash += 1
+
                     continue
+
 
                 entry_notional = (
                     shares
@@ -1352,12 +1524,16 @@ def simulate_portfolio(
                     + entry_commission
                 )
 
+
                 if entry_cost > cash:
 
                     skipped_cash += 1
+
                     continue
 
+
                 cash -= entry_cost
+
 
                 open_positions.append(
                     {
@@ -1387,6 +1563,21 @@ def simulate_portfolio(
                         "Score":
                             trade[
                                 "Score"
+                            ],
+
+                        "Slope_Score":
+                            trade[
+                                "Slope_Score"
+                            ],
+
+                        "EMA_Strength":
+                            trade[
+                                "EMA_Strength"
+                            ],
+
+                        "Close_Location":
+                            trade[
+                                "Close_Location"
                             ],
 
                         "Relative_Volume":
@@ -1423,6 +1614,7 @@ def simulate_portfolio(
 
         remaining = []
 
+
         for position in (
             open_positions
         ):
@@ -1439,6 +1631,7 @@ def simulate_portfolio(
                 )
 
                 continue
+
 
             exit_fill = (
                 float(
@@ -1471,6 +1664,7 @@ def simulate_portfolio(
 
             cash += exit_proceeds
 
+
             net_pnl = (
                 exit_proceeds
                 - position[
@@ -1495,13 +1689,6 @@ def simulate_portfolio(
                 else 0
             )
 
-            holding_days = (
-                date
-                -
-                position[
-                    "Entry_Date"
-                ]
-            ).days
 
             position[
                 "Exit_Fill"
@@ -1519,13 +1706,11 @@ def simulate_portfolio(
                 "Net_R"
             ] = net_r
 
-            position[
-                "Holding_Days"
-            ] = holding_days
 
             completed.append(
                 position
             )
+
 
         open_positions = remaining
 
@@ -1535,6 +1720,7 @@ def simulate_portfolio(
         # ====================================================
 
         market_value = 0.0
+
 
         for position in (
             open_positions
@@ -1556,6 +1742,7 @@ def simulate_portfolio(
                     ]
                 )
 
+
             market_value += (
                 position[
                     "Shares"
@@ -1563,10 +1750,12 @@ def simulate_portfolio(
                 * price
             )
 
+
         equity = (
             cash
             + market_value
         )
+
 
         exposure_pct = (
             market_value
@@ -1575,6 +1764,7 @@ def simulate_portfolio(
             if equity > 0
             else 0
         )
+
 
         equity_rows.append(
             {
@@ -1595,17 +1785,11 @@ def simulate_portfolio(
                         open_positions
                     ),
 
-                "Active":
-                    1
-                    if len(
-                        open_positions
-                    ) > 0
-                    else 0,
-
                 "Exposure_%":
                     exposure_pct
             }
         )
+
 
         last_equity = equity
 
@@ -1633,13 +1817,12 @@ def simulate_portfolio(
 
 
 # ============================================================
-# STATS
+# PERFORMANCE
 # ============================================================
 
 def calculate_stats(
     trades,
-    equity,
-    diagnostics
+    equity
 ):
 
     ending = float(
@@ -1668,14 +1851,6 @@ def calculate_stats(
         / 365.25
     )
 
-    total_return = (
-        (
-            ending
-            / STARTING_CAPITAL
-        )
-        - 1
-    ) * 100
-
     cagr = (
         (
             ending
@@ -1687,17 +1862,19 @@ def calculate_stats(
         - 1
     ) * 100
 
+
     curve = equity[
         "Equity"
     ]
 
     peak = curve.cummax()
 
-    drawdown = (
+    dd = (
         curve
         / peak
         - 1
     ) * 100
+
 
     winners = trades.loc[
         trades[
@@ -1713,39 +1890,25 @@ def calculate_stats(
         "Net_PnL"
     ]
 
-    gross_profit = (
-        winners.sum()
-    )
-
-    gross_loss = abs(
-        losers.sum()
-    )
 
     pf = (
-        gross_profit
-        / gross_loss
-        if gross_loss > 0
+        winners.sum()
+        /
+        abs(
+            losers.sum()
+        )
+        if abs(
+            losers.sum()
+        ) > 0
         else np.inf
     )
 
-    active_days = int(
-        equity[
-            "Active"
-        ].sum()
-    )
-
-    total_days = len(
-        equity
-    )
 
     return {
-        "Ending_Capital":
+        "Ending":
             ending,
 
-        "Return_%":
-            total_return,
-
-        "CAGR_%":
+        "CAGR":
             cagr,
 
         "Trades":
@@ -1753,165 +1916,109 @@ def calculate_stats(
                 trades
             ),
 
-        "Trades_Per_Year":
-            len(
-                trades
-            )
-            / years,
-
-        "Profitable_%":
-            (
-                trades[
-                    "Net_PnL"
-                ] > 0
-            ).mean()
-            * 100,
-
-        "Avg_Net_R":
+        "Avg_R":
             trades[
                 "Net_R"
             ].mean(),
 
-        "Median_R":
-            trades[
-                "Net_R"
-            ].median(),
-
-        "Profit_Factor":
+        "PF":
             pf,
 
-        "Max_DD_%":
-            float(
-                drawdown.min()
-            ),
+        "Max_DD":
+            dd.min(),
 
-        "Active_Days_%":
-            (
-                active_days
-                / total_days
-                * 100
-            ),
-
-        "Avg_Positions":
-            equity[
-                "Open_Positions"
-            ].mean(),
-
-        "Avg_Exposure_%":
+        "Exposure":
             equity[
                 "Exposure_%"
-            ].mean(),
-
-        "Avg_Holding_Days":
-            trades[
-                "Holding_Days"
-            ].mean(),
-
-        "Skipped_Positions":
-            diagnostics[
-                "Skipped_Positions"
-            ],
-
-        "Skipped_Cash":
-            diagnostics[
-                "Skipped_Cash"
-            ]
+            ].mean()
     }
 
 
 # ============================================================
-# RELATIVE VOLUME BUCKET ANALYSIS
-#
-# DIAGNOSTIC ONLY.
-# DOES NOT ALTER THE STRATEGY.
+# QUARTILE ANALYSIS
 # ============================================================
 
-def volume_bucket_analysis(
-    trades
+def quartile_analysis(
+    df,
+    r_column
 ):
 
-    if trades.empty:
+    if df.empty:
+
         return pd.DataFrame()
 
-    df = trades.copy()
 
-    bins = [
-        0,
-        0.50,
-        0.65,
-        0.80,
-        1.00,
-        1.25,
-        1.50,
-        2.00,
-        np.inf
-    ]
+    work = df.copy()
 
-    labels = [
-        "<0.50",
-        "0.50-0.65",
-        "0.65-0.80",
-        "0.80-1.00",
-        "1.00-1.25",
-        "1.25-1.50",
-        "1.50-2.00",
-        "2.00+"
-    ]
 
-    df[
-        "Volume_Bucket"
-    ] = pd.cut(
-        df[
-            "Relative_Volume"
-        ],
-        bins=bins,
-        labels=labels,
-        right=False
+    # Rank first so duplicate scores cannot break qcut.
+    score_rank = (
+        work[
+            "Score"
+        ]
+        .rank(
+            method="first"
+        )
     )
+
+
+    work[
+        "Score_Quartile"
+    ] = pd.qcut(
+        score_rank,
+        4,
+        labels=[
+            "Q1 Bottom",
+            "Q2",
+            "Q3",
+            "Q4 Top"
+        ]
+    )
+
 
     rows = []
 
-    for bucket, group in (
-        df.groupby(
-            "Volume_Bucket",
+
+    for quartile, group in (
+        work.groupby(
+            "Score_Quartile",
             observed=False
         )
     ):
 
-        if group.empty:
-            continue
-
-        positive_r = group.loc[
+        positive = group.loc[
             group[
-                "Net_R"
+                r_column
             ] > 0,
-            "Net_R"
+            r_column
         ]
 
-        negative_r = group.loc[
+        negative = group.loc[
             group[
-                "Net_R"
+                r_column
             ] < 0,
-            "Net_R"
+            r_column
         ]
+
 
         pf_r = (
-            positive_r.sum()
+            positive.sum()
             /
             abs(
-                negative_r.sum()
+                negative.sum()
             )
             if abs(
-                negative_r.sum()
+                negative.sum()
             ) > 0
             else np.inf
         )
 
+
         rows.append(
             {
-                "Volume_Bucket":
+                "Quartile":
                     str(
-                        bucket
+                        quartile
                     ),
 
                 "Trades":
@@ -1919,181 +2026,286 @@ def volume_bucket_analysis(
                         group
                     ),
 
+                "Avg_Score":
+                    group[
+                        "Score"
+                    ].mean(),
+
                 "Avg_R":
                     group[
-                        "Net_R"
+                        r_column
                     ].mean(),
 
                 "Median_R":
                     group[
-                        "Net_R"
+                        r_column
                     ].median(),
 
                 "PF_R":
                     pf_r,
 
-                "Net_PnL":
-                    group[
-                        "Net_PnL"
-                    ].sum(),
-
                 "Win_%":
                     (
                         group[
-                            "Net_PnL"
+                            r_column
                         ] > 0
                     ).mean()
                     * 100
             }
         )
 
+
+    result = pd.DataFrame(
+        rows
+    )
+
+
+    order = [
+        "Q4 Top",
+        "Q3",
+        "Q2",
+        "Q1 Bottom"
+    ]
+
+
+    result[
+        "Quartile"
+    ] = pd.Categorical(
+        result[
+            "Quartile"
+        ],
+        categories=order,
+        ordered=True
+    )
+
+
+    return (
+        result
+        .sort_values(
+            "Quartile"
+        )
+        .set_index(
+            "Quartile"
+        )
+    )
+
+
+# ============================================================
+# TOP HALF VS BOTTOM HALF
+# ============================================================
+
+def half_analysis(
+    df,
+    r_column
+):
+
+    if df.empty:
+
+        return pd.DataFrame()
+
+
+    work = df.copy()
+
+
+    score_rank = (
+        work[
+            "Score"
+        ]
+        .rank(
+            method="first"
+        )
+    )
+
+
+    work[
+        "Half"
+    ] = pd.qcut(
+        score_rank,
+        2,
+        labels=[
+            "Bottom 50%",
+            "Top 50%"
+        ]
+    )
+
+
+    rows = []
+
+
+    for half, group in (
+        work.groupby(
+            "Half",
+            observed=False
+        )
+    ):
+
+        positive = group.loc[
+            group[
+                r_column
+            ] > 0,
+            r_column
+        ]
+
+        negative = group.loc[
+            group[
+                r_column
+            ] < 0,
+            r_column
+        ]
+
+
+        pf_r = (
+            positive.sum()
+            /
+            abs(
+                negative.sum()
+            )
+            if abs(
+                negative.sum()
+            ) > 0
+            else np.inf
+        )
+
+
+        rows.append(
+            {
+                "Half":
+                    str(
+                        half
+                    ),
+
+                "Trades":
+                    len(
+                        group
+                    ),
+
+                "Avg_Score":
+                    group[
+                        "Score"
+                    ].mean(),
+
+                "Avg_R":
+                    group[
+                        r_column
+                    ].mean(),
+
+                "Median_R":
+                    group[
+                        r_column
+                    ].median(),
+
+                "PF_R":
+                    pf_r,
+
+                "Win_%":
+                    (
+                        group[
+                            r_column
+                        ] > 0
+                    ).mean()
+                    * 100
+            }
+        )
+
+
     return (
         pd.DataFrame(
             rows
         )
         .set_index(
-            "Volume_Bucket"
+            "Half"
         )
     )
 
 
 # ============================================================
-# RUN VARIANT
+# RANK CORRELATION
 # ============================================================
 
-def run_variant(
-    name,
-    use_volume,
-    all_data,
-    prepared_data,
-    qqq,
-    dxy,
-    backtest_start
+def rank_correlation(
+    df,
+    score_column,
+    r_column
 ):
 
-    print()
-
-    print(
-        "=" * 120
+    valid = (
+        df[
+            [
+                score_column,
+                r_column
+            ]
+        ]
+        .dropna()
     )
 
-    print(
-        f"RUNNING: {name}"
-    )
 
-    print(
-        "=" * 120
-    )
+    if len(valid) < 2:
 
-    (
-        candidates,
-        candidate_diag
-    ) = generate_candidates(
-        all_data,
-        qqq,
-        dxy,
-        backtest_start,
-        use_volume
-    )
+        return np.nan
 
-    print(
-        f"Candidates:            "
-        f"{len(candidates)}"
-    )
-
-    print(
-        f"Raw signals:           "
-        f"{candidate_diag['Raw_Signals']}"
-    )
-
-    print(
-        f"Rejected market:       "
-        f"{candidate_diag['Rejected_Market']}"
-    )
-
-    plans = create_trade_plans(
-        candidates,
-        prepared_data
-    )
-
-    (
-        trades,
-        equity,
-        diagnostics
-    ) = simulate_portfolio(
-        plans,
-        all_data,
-        qqq,
-        backtest_start
-    )
-
-    stats = calculate_stats(
-        trades,
-        equity,
-        diagnostics
-    )
-
-    print()
-
-    print(
-        f"Ending capital:        "
-        f"${stats['Ending_Capital']:,.2f}"
-    )
-
-    print(
-        f"CAGR:                  "
-        f"{stats['CAGR_%']:.2f}%"
-    )
-
-    print(
-        f"Trades:                "
-        f"{stats['Trades']}"
-    )
-
-    print(
-        f"Trades/year:           "
-        f"{stats['Trades_Per_Year']:.2f}"
-    )
-
-    print(
-        f"Avg Net R:             "
-        f"{stats['Avg_Net_R']:.3f}R"
-    )
-
-    print(
-        f"Profit Factor:         "
-        f"{stats['Profit_Factor']:.3f}"
-    )
-
-    print(
-        f"Max DD:                "
-        f"{stats['Max_DD_%']:.2f}%"
-    )
-
-    print(
-        f"Active days:           "
-        f"{stats['Active_Days_%']:.2f}%"
-    )
-
-    print(
-        f"Average positions:     "
-        f"{stats['Avg_Positions']:.2f}"
-    )
-
-    print(
-        f"Average exposure:      "
-        f"{stats['Avg_Exposure_%']:.2f}%"
-    )
-
-    print(
-        f"Skipped positions:     "
-        f"{stats['Skipped_Positions']}"
-    )
 
     return (
-        stats,
-        trades,
-        equity
+        valid[
+            score_column
+        ]
+        .rank()
+        .corr(
+            valid[
+                r_column
+            ]
+            .rank()
+        )
+    )
+
+
+# ============================================================
+# SCORE COMPONENT DIAGNOSTIC
+# ============================================================
+
+def component_correlations(
+    df,
+    r_column
+):
+
+    components = [
+        "Score",
+        "Slope_Score",
+        "EMA_Strength",
+        "Close_Location",
+        "Relative_Volume"
+    ]
+
+
+    rows = []
+
+
+    for component in components:
+
+        correlation = rank_correlation(
+            df,
+            component,
+            r_column
+        )
+
+
+        rows.append(
+            {
+                "Component":
+                    component,
+
+                "Rank_Correlation_With_R":
+                    correlation
+            }
+        )
+
+
+    return (
+        pd.DataFrame(
+            rows
+        )
+        .set_index(
+            "Component"
+        )
     )
 
 
@@ -2108,7 +2320,7 @@ def main():
     )
 
     print(
-        "V22 - RELATIVE VOLUME >= 0.80 ON VS OFF"
+        "V23 - QUALITY SCORE / RANKING DIAGNOSTIC"
     )
 
     print(
@@ -2116,27 +2328,13 @@ def main():
     )
 
     print(
-        "STOCH RSI: OFF"
-    )
-
-    print(
-        "RSI filter: OFF"
+        "NO strategy rules changed."
     )
 
     print()
 
     print(
-        "Only tested concept:"
-    )
-
-    print(
-        "  Relative Volume >= 0.80"
-    )
-
-    print()
-
-    print(
-        "Market regime:"
+        "Current locked core:"
     )
 
     print(
@@ -2147,26 +2345,33 @@ def main():
         "  DXY < SMA200"
     )
 
-    print()
-
     print(
-        f"Risk:                  "
-        f"{RISK_PER_TRADE * 100:.2f}%"
+        "  Stoch RSI OFF"
     )
 
     print(
-        f"Max positions:         "
-        f"{MAX_POSITIONS}"
+        "  RSI OFF"
     )
 
     print(
-        f"ATR trail:             "
-        f"{ATR_TRAIL_MULT:.1f}"
+        "  Relative Volume >= 0.80"
+    )
+
+    print(
+        "  2.5 ATR trail"
+    )
+
+    print(
+        "  Risk 0.75%"
+    )
+
+    print(
+        "  Max positions 5"
     )
 
 
     # ========================================================
-    # DOWNLOAD ONCE
+    # DOWNLOAD
     # ========================================================
 
     print()
@@ -2175,6 +2380,7 @@ def main():
         f"Downloading "
         f"{len(TICKERS)} stocks..."
     )
+
 
     all_data = yf.download(
         TICKERS,
@@ -2187,15 +2393,18 @@ def main():
         threads=True
     )
 
+
     qqq = download_market(
         "QQQ",
         "QQQ"
     )
 
+
     dxy = download_market(
         "DX-Y.NYB",
         "DXY"
     )
+
 
     end_date = min(
         pd.Timestamp(
@@ -2206,12 +2415,14 @@ def main():
         )
     )
 
+
     requested_start = (
         end_date
         - pd.DateOffset(
             years=BACKTEST_YEARS
         )
     )
+
 
     backtest_start = max(
         requested_start,
@@ -2223,6 +2434,7 @@ def main():
         )
     )
 
+
     print(
         f"Backtest:              "
         f"{backtest_start.date()} "
@@ -2231,10 +2443,11 @@ def main():
 
 
     # ========================================================
-    # PREPARE DATA
+    # PREPARE
     # ========================================================
 
     prepared_data = {}
+
 
     for ticker in TICKERS:
 
@@ -2255,193 +2468,80 @@ def main():
                     ].copy()
                 )
 
-        except Exception:
-            pass
+        except Exception as e:
+
+            print(
+                f"PREP ERROR {ticker}: {e}"
+            )
 
 
     # ========================================================
-    # RUN A
+    # CANDIDATES
     # ========================================================
 
     (
-        stats_on,
-        trades_on,
-        equity_on
-    ) = run_variant(
-        "A - RELATIVE VOLUME >= 0.80 ON",
-        True,
+        candidates,
+        candidate_diag
+    ) = generate_candidates(
         all_data,
-        prepared_data,
         qqq,
         dxy,
         backtest_start
     )
 
 
+    print()
+
+    print(
+        f"Candidates:            "
+        f"{len(candidates)}"
+    )
+
+    print(
+        f"Raw signals:           "
+        f"{candidate_diag['Raw_Signals']}"
+    )
+
+    print(
+        f"Rejected market:       "
+        f"{candidate_diag['Rejected_Market']}"
+    )
+
+
     # ========================================================
-    # RUN B
+    # ALL CANDIDATE TRADE PLANS
+    # ========================================================
+
+    plans = create_trade_plans(
+        candidates,
+        prepared_data
+    )
+
+
+    # ========================================================
+    # PORTFOLIO
     # ========================================================
 
     (
-        stats_off,
-        trades_off,
-        equity_off
-    ) = run_variant(
-        "B - RELATIVE VOLUME OFF",
-        False,
+        trades,
+        equity,
+        diagnostics
+    ) = simulate_portfolio(
+        plans,
         all_data,
-        prepared_data,
         qqq,
-        dxy,
         backtest_start
     )
 
 
-    # ========================================================
-    # DIRECT COMPARISON
-    # ========================================================
-
-    print()
-
-    print(
-        "=" * 120
+    stats = calculate_stats(
+        trades,
+        equity
     )
-
-    print(
-        "V22 DIRECT COMPARISON"
-    )
-
-    print(
-        "=" * 120
-    )
-
-    print(
-        f"{'Metric':<25}"
-        f"{'VOLUME ON':>15}"
-        f"{'VOLUME OFF':>15}"
-    )
-
-    print(
-        "-" * 55
-    )
-
-    comparison = [
-        (
-            "CAGR %",
-            stats_on[
-                "CAGR_%"
-            ],
-            stats_off[
-                "CAGR_%"
-            ]
-        ),
-
-        (
-            "Trades",
-            stats_on[
-                "Trades"
-            ],
-            stats_off[
-                "Trades"
-            ]
-        ),
-
-        (
-            "Trades/year",
-            stats_on[
-                "Trades_Per_Year"
-            ],
-            stats_off[
-                "Trades_Per_Year"
-            ]
-        ),
-
-        (
-            "Avg Net R",
-            stats_on[
-                "Avg_Net_R"
-            ],
-            stats_off[
-                "Avg_Net_R"
-            ]
-        ),
-
-        (
-            "Profit Factor",
-            stats_on[
-                "Profit_Factor"
-            ],
-            stats_off[
-                "Profit_Factor"
-            ]
-        ),
-
-        (
-            "Max DD %",
-            stats_on[
-                "Max_DD_%"
-            ],
-            stats_off[
-                "Max_DD_%"
-            ]
-        ),
-
-        (
-            "Active days %",
-            stats_on[
-                "Active_Days_%"
-            ],
-            stats_off[
-                "Active_Days_%"
-            ]
-        ),
-
-        (
-            "Avg positions",
-            stats_on[
-                "Avg_Positions"
-            ],
-            stats_off[
-                "Avg_Positions"
-            ]
-        ),
-
-        (
-            "Exposure %",
-            stats_on[
-                "Avg_Exposure_%"
-            ],
-            stats_off[
-                "Avg_Exposure_%"
-            ]
-        ),
-
-        (
-            "Skipped positions",
-            stats_on[
-                "Skipped_Positions"
-            ],
-            stats_off[
-                "Skipped_Positions"
-            ]
-        )
-    ]
-
-    for (
-        metric,
-        on,
-        off
-    ) in comparison:
-
-        print(
-            f"{metric:<25}"
-            f"{on:>15.3f}"
-            f"{off:>15.3f}"
-        )
 
 
     # ========================================================
-    # CHANGES
+    # BASELINE CHECK
     # ========================================================
 
     print()
@@ -2451,7 +2551,7 @@ def main():
     )
 
     print(
-        "CHANGE WHEN VOLUME FILTER IS REMOVED"
+        "BASELINE PERFORMANCE CHECK"
     )
 
     print(
@@ -2459,50 +2559,69 @@ def main():
     )
 
     print(
-        f"CAGR change:           "
-        f"{stats_off['CAGR_%'] - stats_on['CAGR_%']:+.2f} pp"
+        f"Ending capital:        "
+        f"${stats['Ending']:,.2f}"
     )
 
     print(
-        f"Trade change:          "
-        f"{stats_off['Trades'] - stats_on['Trades']:+d}"
+        f"CAGR:                  "
+        f"{stats['CAGR']:.2f}%"
     )
 
     print(
-        f"Avg R change:          "
-        f"{stats_off['Avg_Net_R'] - stats_on['Avg_Net_R']:+.3f}R"
+        f"Trades:                "
+        f"{stats['Trades']}"
     )
 
     print(
-        f"PF change:             "
-        f"{stats_off['Profit_Factor'] - stats_on['Profit_Factor']:+.3f}"
+        f"Avg Net R:             "
+        f"{stats['Avg_R']:.3f}R"
     )
 
     print(
-        f"DD change:             "
-        f"{stats_off['Max_DD_%'] - stats_on['Max_DD_%']:+.2f} pp"
+        f"Profit Factor:         "
+        f"{stats['PF']:.3f}"
     )
 
     print(
-        f"Active days change:    "
-        f"{stats_off['Active_Days_%'] - stats_on['Active_Days_%']:+.2f} pp"
+        f"Max DD:                "
+        f"{stats['Max_DD']:.2f}%"
     )
 
     print(
-        f"Exposure change:       "
-        f"{stats_off['Avg_Exposure_%'] - stats_on['Avg_Exposure_%']:+.2f} pp"
+        f"Average exposure:      "
+        f"{stats['Exposure']:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Skipped max positions: "
+        f"{diagnostics['Skipped_Positions']}"
+    )
+
+    print(
+        f"Skipped cash:          "
+        f"{diagnostics['Skipped_Cash']}"
+    )
+
+    print(
+        f"Skipped same ticker:   "
+        f"{diagnostics['Skipped_Same_Ticker']}"
     )
 
 
     # ========================================================
-    # VOLUME BUCKETS
+    # A. EXECUTED TRADES
     # ========================================================
 
-    bucket_stats = (
-        volume_bucket_analysis(
-            trades_off
+    executed_quartiles = (
+        quartile_analysis(
+            trades,
+            "Net_R"
         )
     )
+
 
     print()
 
@@ -2511,7 +2630,7 @@ def main():
     )
 
     print(
-        "RELATIVE VOLUME BUCKET PERFORMANCE - FILTER OFF"
+        "A. EXECUTED TRADES - SCORE QUARTILES"
     )
 
     print(
@@ -2519,39 +2638,326 @@ def main():
     )
 
     print(
-        bucket_stats
+        executed_quartiles
         .round(3)
         .to_string()
     )
+
+
+    executed_halves = (
+        half_analysis(
+            trades,
+            "Net_R"
+        )
+    )
+
+
+    print()
+
+    print(
+        "EXECUTED - TOP HALF VS BOTTOM HALF"
+    )
+
+    print(
+        "-" * 80
+    )
+
+    print(
+        executed_halves
+        .round(3)
+        .to_string()
+    )
+
+
+    executed_corr = (
+        rank_correlation(
+            trades,
+            "Score",
+            "Net_R"
+        )
+    )
+
+
+    print()
+
+    print(
+        f"Executed Score -> R "
+        f"rank correlation: "
+        f"{executed_corr:.4f}"
+    )
+
+
+    # ========================================================
+    # B. ALL CANDIDATES
+    # ========================================================
+
+    candidate_quartiles = (
+        quartile_analysis(
+            plans,
+            "Candidate_Net_R"
+        )
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "B. ALL VALID CANDIDATES - SCORE QUARTILES"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "Each candidate is evaluated independently."
+    )
+
+    print(
+        "Portfolio position/cash limits are ignored here."
+    )
+
+    print()
+
+    print(
+        candidate_quartiles
+        .round(3)
+        .to_string()
+    )
+
+
+    candidate_halves = (
+        half_analysis(
+            plans,
+            "Candidate_Net_R"
+        )
+    )
+
+
+    print()
+
+    print(
+        "ALL CANDIDATES - TOP HALF VS BOTTOM HALF"
+    )
+
+    print(
+        "-" * 80
+    )
+
+    print(
+        candidate_halves
+        .round(3)
+        .to_string()
+    )
+
+
+    candidate_corr = (
+        rank_correlation(
+            plans,
+            "Score",
+            "Candidate_Net_R"
+        )
+    )
+
+
+    print()
+
+    print(
+        f"Candidate Score -> R "
+        f"rank correlation: "
+        f"{candidate_corr:.4f}"
+    )
+
+
+    # ========================================================
+    # C. COMPONENT CORRELATIONS
+    # ========================================================
+
+    component_stats = (
+        component_correlations(
+            plans,
+            "Candidate_Net_R"
+        )
+    )
+
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "C. SCORE COMPONENT CORRELATIONS"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "Positive = higher component tends to correspond to higher R."
+    )
+
+    print(
+        "Negative = higher component tends to correspond to lower R."
+    )
+
+    print()
+
+    print(
+        component_stats
+        .round(4)
+        .to_string()
+    )
+
+
+    # ========================================================
+    # SIMPLE INTERPRETATION FLAGS
+    # ========================================================
+
+    print()
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        "D. RANKING DIAGNOSTIC"
+    )
+
+    print(
+        "=" * 120
+    )
+
+
+    if (
+        "Q4 Top"
+        in candidate_quartiles.index
+        and
+        "Q1 Bottom"
+        in candidate_quartiles.index
+    ):
+
+        top_r = (
+            candidate_quartiles.loc[
+                "Q4 Top",
+                "Avg_R"
+            ]
+        )
+
+        bottom_r = (
+            candidate_quartiles.loc[
+                "Q1 Bottom",
+                "Avg_R"
+            ]
+        )
+
+        top_pf = (
+            candidate_quartiles.loc[
+                "Q4 Top",
+                "PF_R"
+            ]
+        )
+
+        bottom_pf = (
+            candidate_quartiles.loc[
+                "Q1 Bottom",
+                "PF_R"
+            ]
+        )
+
+
+        print(
+            f"Top quartile Avg R:    "
+            f"{top_r:.3f}R"
+        )
+
+        print(
+            f"Bottom quartile Avg R: "
+            f"{bottom_r:.3f}R"
+        )
+
+        print(
+            f"Top quartile PF_R:     "
+            f"{top_pf:.3f}"
+        )
+
+        print(
+            f"Bottom quartile PF_R:  "
+            f"{bottom_pf:.3f}"
+        )
+
+        print()
+
+
+        if (
+            top_r > bottom_r
+            and
+            candidate_corr > 0.10
+        ):
+
+            print(
+                "RESULT: Score shows useful positive ranking ability."
+            )
+
+        elif (
+            top_r > bottom_r
+            and
+            candidate_corr > 0
+        ):
+
+            print(
+                "RESULT: Score shows weak positive ranking ability."
+            )
+
+        else:
+
+            print(
+                "RESULT: Score does NOT show reliable ranking ability."
+            )
 
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    trades_on.to_csv(
-        "v22_volume_on_trades.csv",
+    candidates.to_csv(
+        "v23_candidates.csv",
         index=False
     )
 
-    trades_off.to_csv(
-        "v22_volume_off_trades.csv",
+    plans.to_csv(
+        "v23_all_candidate_plans.csv",
         index=False
     )
 
-    equity_on.to_csv(
-        "v22_volume_on_equity.csv",
+    trades.to_csv(
+        "v23_executed_trades.csv",
         index=False
     )
 
-    equity_off.to_csv(
-        "v22_volume_off_equity.csv",
+    equity.to_csv(
+        "v23_equity.csv",
         index=False
     )
 
-    bucket_stats.to_csv(
-        "v22_volume_buckets.csv"
+    executed_quartiles.to_csv(
+        "v23_executed_quartiles.csv"
     )
+
+    candidate_quartiles.to_csv(
+        "v23_candidate_quartiles.csv"
+    )
+
+    component_stats.to_csv(
+        "v23_score_component_correlations.csv"
+    )
+
 
     print()
 
@@ -2560,7 +2966,7 @@ def main():
     )
 
     print(
-        "V22 completed."
+        "V23 completed."
     )
 
     print(
